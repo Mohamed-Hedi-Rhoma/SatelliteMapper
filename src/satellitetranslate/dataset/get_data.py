@@ -47,7 +47,7 @@ SITES = [
     {"name": "new_zealand", "lat": -43.5945, "lon": 170.2386, "description": "Mountains/Glaciers"}
 ]
 
-# Time range (2 years of data)
+# Time range
 START_DATE = '2021-01-01'
 END_DATE = '2023-12-31'
 
@@ -60,6 +60,25 @@ OUTPUT_DIR = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data'
 
 # Create output directory
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Define bands and their names
+LANDSAT_BANDS = {
+    'SR_B2': 'blue',
+    'SR_B3': 'green',
+    'SR_B4': 'red',
+    'SR_B5': 'nir',
+    'SR_B6': 'swir1',
+    'SR_B7': 'swir2'
+}
+
+SENTINEL_BANDS = {
+    'B2': 'blue',
+    'B3': 'green',
+    'B4': 'red',
+    'B8': 'nir',
+    'B11': 'swir1',
+    'B12': 'swir2'
+}
 
 # Define functions
 def get_landsat_collection(start_date, end_date, cloud_cover):
@@ -135,18 +154,21 @@ def extract_date_string(datetime_obj):
     """Convert datetime to YYYY-MM-DD string."""
     return datetime_obj.strftime('%Y-%m-%d')
 
-def download_image_patch(image, geometry, scale, bands, filename, patch_size):
-    """Download a patch of a GEE image to a local file."""
+def download_single_band(image, band_name, geometry, scale, filename, patch_size):
+    """Download a single band of a GEE image to a local file."""
     # Skip if file already exists
     if os.path.exists(filename):
         print(f"File already exists, skipping: {filename}")
         return True
-        
-    url = image.getDownloadURL({
+    
+    # Select just this band
+    single_band_image = image.select([band_name])
+    
+    url = single_band_image.getDownloadURL({
         'region': geometry,
         'dimensions': f'{patch_size}x{patch_size}',
         'format': 'GEO_TIFF',
-        'bands': bands
+        'bands': [band_name]
     })
     
     # Download the image
@@ -178,10 +200,6 @@ def process_site(site):
     pairs = find_matching_pairs(site)
     print(f"Found {len(pairs)} matching pairs for {site_name}")
     
-    # Define bands to download
-    landsat_bands = ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7']
-    sentinel_bands = ['B2', 'B3', 'B4', 'B8', 'B11', 'B12']
-    
     # Counter for tracking actual downloads
     pairs_downloaded = 0
     pairs_skipped = 0
@@ -199,12 +217,13 @@ def process_site(site):
         os.makedirs(landsat_dir, exist_ok=True)
         os.makedirs(sentinel_dir, exist_ok=True)
         
-        # Define filenames
-        landsat_file = os.path.join(landsat_dir, f'landsat8_{site_name}_{landsat_date}.tif')
-        sentinel_file = os.path.join(sentinel_dir, f'sentinel2_{site_name}_{sentinel_date}.tif')
+        # Check if all bands already exist
+        all_landsat_exist = all(os.path.exists(os.path.join(landsat_dir, f'landsat8_{site_name}_{landsat_date}_{band_desc}.tif')) 
+                              for band_desc in LANDSAT_BANDS.values())
+        all_sentinel_exist = all(os.path.exists(os.path.join(sentinel_dir, f'sentinel2_{site_name}_{sentinel_date}_{band_desc}.tif')) 
+                               for band_desc in SENTINEL_BANDS.values())
         
-        # Check if both files already exist
-        if os.path.exists(landsat_file) and os.path.exists(sentinel_file):
+        if all_landsat_exist and all_sentinel_exist:
             print(f"Pair {i+1}/{len(pairs)} for {site_name} already downloaded, skipping")
             pairs_skipped += 1
             continue
@@ -221,47 +240,72 @@ def process_site(site):
                     'landsat_resolution': '30m',
                     'sentinel_resolution': '10m',
                     'landsat_patch_size': LANDSAT_PATCH_SIZE,
-                    'sentinel_patch_size': SENTINEL_PATCH_SIZE
+                    'sentinel_patch_size': SENTINEL_PATCH_SIZE,
+                    'landsat_bands': list(LANDSAT_BANDS.keys()),
+                    'sentinel_bands': list(SENTINEL_BANDS.keys())
                 }, f, indent=2, default=str)
         
-        # Download Landsat image at 30m resolution (LANDSAT_PATCH_SIZE pixels)
-        downloaded_l = download_image_patch(
-            pair['landsat'], region, 30, landsat_bands, landsat_file, LANDSAT_PATCH_SIZE
-        )
-        
-        # Download Sentinel image at 10m resolution (SENTINEL_PATCH_SIZE pixels) if Landsat was successful
-        # Same geographic area but 3x the pixels in each dimension
-        if downloaded_l:
-            downloaded_s = download_image_patch(
-                pair['sentinel'], region, 10, sentinel_bands, sentinel_file, SENTINEL_PATCH_SIZE
-            )
+        # Download each Landsat band
+        landsat_success = True
+        for band_code, band_desc in LANDSAT_BANDS.items():
+            landsat_file = os.path.join(landsat_dir, f'landsat8_{site_name}_{landsat_date}_{band_desc}.tif')
             
-            if downloaded_s:
+            if not os.path.exists(landsat_file):
+                band_success = download_single_band(
+                    pair['landsat'], band_code, region, 30, landsat_file, LANDSAT_PATCH_SIZE
+                )
+                if not band_success:
+                    landsat_success = False
+                    break
+                # Small delay between band downloads
+                time.sleep(0.5)
+        
+        # Download each Sentinel band if Landsat was successful
+        sentinel_success = True
+        if landsat_success:
+            for band_code, band_desc in SENTINEL_BANDS.items():
+                sentinel_file = os.path.join(sentinel_dir, f'sentinel2_{site_name}_{sentinel_date}_{band_desc}.tif')
+                
+                if not os.path.exists(sentinel_file):
+                    band_success = download_single_band(
+                        pair['sentinel'], band_code, region, 10, sentinel_file, SENTINEL_PATCH_SIZE
+                    )
+                    if not band_success:
+                        sentinel_success = False
+                        break
+                    # Small delay between band downloads
+                    time.sleep(0.5)
+            
+            if sentinel_success:
                 pairs_downloaded += 1
                 print(f"Downloaded pair {i+1}/{len(pairs)} for {site_name}")
         
-        # Add a short delay to avoid rate limiting
+        # Add a delay to avoid rate limiting
         time.sleep(1)
     
     print(f"Site {site_name} summary: {pairs_downloaded} pairs downloaded, {pairs_skipped} pairs skipped")
 
 # Process all sites
 def main():
-    print(f"Starting SatelliteTranslate data collection")
+    print(f"Starting SatelliteTranslate data collection (separate bands)")
     print(f"Time range: {START_DATE} to {END_DATE}")
     print(f"Max cloud cover: {MAX_CLOUD_COVER}%")
     print(f"Max days between acquisitions: {MAX_DAYS_DIFFERENCE}")
     print(f"Landsat patch size: {LANDSAT_PATCH_SIZE}x{LANDSAT_PATCH_SIZE} pixels (30m resolution)")
     print(f"Sentinel patch size: {SENTINEL_PATCH_SIZE}x{SENTINEL_PATCH_SIZE} pixels (10m resolution)")
     print(f"Sites to process: {len(SITES)}")
+    print(f"Landsat bands: {', '.join([f'{k} ({v})' for k, v in LANDSAT_BANDS.items()])}")
+    print(f"Sentinel bands: {', '.join([f'{k} ({v})' for k, v in SENTINEL_BANDS.items()])}")
     
     # Create a summary file
     with open(os.path.join(OUTPUT_DIR, 'dataset_info.txt'), 'w') as f:
-        f.write(f"SatelliteTranslate Dataset\n")
+        f.write(f"SatelliteTranslate Dataset (separate bands)\n")
         f.write(f"Created: {datetime.datetime.now()}\n")
         f.write(f"Time range: {START_DATE} to {END_DATE}\n")
         f.write(f"Resolution transformation: Landsat 8 (30m) to Sentinel-2 (10m)\n")
         f.write(f"Patch sizes: Landsat {LANDSAT_PATCH_SIZE}x{LANDSAT_PATCH_SIZE}, Sentinel {SENTINEL_PATCH_SIZE}x{SENTINEL_PATCH_SIZE}\n")
+        f.write(f"Landsat bands: {', '.join([f'{k} ({v})' for k, v in LANDSAT_BANDS.items()])}\n")
+        f.write(f"Sentinel bands: {', '.join([f'{k} ({v})' for k, v in SENTINEL_BANDS.items()])}\n")
         f.write(f"Sites:\n")
         for site in SITES:
             f.write(f"  - {site['name']}: {site['description']} ({site['lat']}, {site['lon']})\n")

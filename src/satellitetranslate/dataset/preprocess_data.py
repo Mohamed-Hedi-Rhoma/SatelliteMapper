@@ -8,6 +8,7 @@ from tqdm import tqdm
 def preprocess_satellite_data(base_dir):
     """
     Preprocess Landsat 8 and Sentinel-2 data applying appropriate scaling factors.
+    Handles individual band files.
     
     Landsat 8: Scale factor 0.0000275, Offset -0.2
     Sentinel-2: Scale factor 0.0001, No offset
