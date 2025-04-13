@@ -7,10 +7,13 @@ from datetime import timedelta
 import requests
 import json
 from concurrent.futures import ThreadPoolExecutor
+import rasterio
+import shutil
+import tempfile
 
 # Initialize Earth Engine
 ee.Authenticate()  # You'll need to authenticate first
-ee.Initialize(project ="ee-get-landsat-data")
+ee.Initialize(project="ee-get-landsat-data")
 
 # Define sites - Name and coordinates
 SITES = [
@@ -80,10 +83,32 @@ SENTINEL_BANDS = {
     'B12': 'swir2'
 }
 
+# Define angle bands for mean calculation
+LANDSAT_ANGLES = {
+    'SAA': 'solar_azimuth',
+    'SZA': 'solar_zenith',
+    'VAA': 'view_azimuth',
+    'VZA': 'view_zenith'
+}
+
+# Sentinel-2 angle properties
+SENTINEL_ANGLE_PROPERTIES = {
+    'MEAN_SOLAR_AZIMUTH_ANGLE': 'solar_azimuth',
+    'MEAN_SOLAR_ZENITH_ANGLE': 'solar_zenith',
+    'MEAN_INCIDENCE_AZIMUTH_ANGLE_B2': 'view_azimuth',
+    'MEAN_INCIDENCE_ZENITH_ANGLE_B2': 'view_zenith'
+}
+
 # Define functions
 def get_landsat_collection(start_date, end_date, cloud_cover):
-    """Get Landsat 8 collection with filtering."""
+    """Get Landsat 8 Level 2 collection with filtering."""
     return (ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+            .filterDate(start_date, end_date)
+            .filter(ee.Filter.lt('CLOUD_COVER', cloud_cover)))
+
+def get_landsat_angles_collection(start_date, end_date, cloud_cover):
+    """Get Landsat 8 Level 1 collection for angle data."""
+    return (ee.ImageCollection('LANDSAT/LC08/C02/T1')
             .filterDate(start_date, end_date)
             .filter(ee.Filter.lt('CLOUD_COVER', cloud_cover)))
 
@@ -93,6 +118,20 @@ def get_sentinel_collection(start_date, end_date, cloud_cover):
             .filterDate(start_date, end_date)
             .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', cloud_cover)))
 
+def extract_sentinel_angle_means(sentinel_image):
+    """Extract mean angle values from Sentinel-2 metadata."""
+    angle_means = {}
+    
+    for prop_name, angle_name in SENTINEL_ANGLE_PROPERTIES.items():
+        try:
+            angle_value = sentinel_image.get(prop_name).getInfo()
+            angle_means[angle_name] = angle_value
+        except Exception as e:
+            print(f"Warning: Could not extract {prop_name} from Sentinel-2 metadata: {e}")
+            angle_means[angle_name] = None
+            
+    return angle_means
+
 def find_matching_pairs(site, max_days_diff=MAX_DAYS_DIFFERENCE):
     """Find temporally aligned Landsat 8 and Sentinel-2 image pairs."""
     point = ee.Geometry.Point([site['lon'], site['lat']])
@@ -100,6 +139,8 @@ def find_matching_pairs(site, max_days_diff=MAX_DAYS_DIFFERENCE):
     # Get collections filtered to this point
     landsat = (get_landsat_collection(START_DATE, END_DATE, MAX_CLOUD_COVER)
               .filterBounds(point))
+    landsat_angles = (get_landsat_angles_collection(START_DATE, END_DATE, MAX_CLOUD_COVER)
+                     .filterBounds(point))
     sentinel = (get_sentinel_collection(START_DATE, END_DATE, MAX_CLOUD_COVER)
                .filterBounds(point))
     
@@ -132,17 +173,50 @@ def find_matching_pairs(site, max_days_diff=MAX_DAYS_DIFFERENCE):
     result = []
     landsat_list = landsat.toList(landsat.size())
     sentinel_list = sentinel.toList(sentinel.size())
+    landsat_angles_list = landsat_angles.toList(landsat_angles.size())
     
     for pair in pairs:
         try:
             l_img = ee.Image(landsat_list.get(pair['landsat_index']))
             s_img = ee.Image(sentinel_list.get(pair['sentinel_index']))
             
+            # Find matching Landsat L1 image for angles
+            l_time = l_img.get('system:time_start')
+            l_angles_imgs = landsat_angles.filter(ee.Filter.equals('system:time_start', l_time))
+            
+            # If no exact match is found, use the closest in time
+            if l_angles_imgs.size().getInfo() == 0:
+                l_angles_imgs = landsat_angles.filter(
+                    ee.Filter.calendarRange(
+                        pair['landsat_date'].year, pair['landsat_date'].year, 'year'
+                    ).And(
+                        ee.Filter.calendarRange(
+                            pair['landsat_date'].month, pair['landsat_date'].month, 'month'
+                        ).And(
+                            ee.Filter.calendarRange(
+                                pair['landsat_date'].day, pair['landsat_date'].day, 'day'
+                            )
+                        )
+                    )
+                )
+            
+            # If we still don't have an angle image, skip this pair
+            if l_angles_imgs.size().getInfo() == 0:
+                print(f"No matching Landsat angle data found for {pair['landsat_date']}, skipping pair")
+                continue
+                
+            l_angles_img = ee.Image(l_angles_imgs.first())
+            
+            # Extract Sentinel-2 angle means directly from metadata
+            s_angle_means = extract_sentinel_angle_means(s_img)
+            
             result.append({
                 'landsat': l_img,
+                'landsat_angles': l_angles_img,
                 'sentinel': s_img,
                 'landsat_date': pair['landsat_date'],
                 'sentinel_date': pair['sentinel_date'],
+                'sentinel_angle_means': s_angle_means,
                 'diff_days': pair['diff_days']
             })
         except Exception as e:
@@ -182,6 +256,46 @@ def download_single_band(image, band_name, geometry, scale, filename, patch_size
         print(f"Failed to download {filename}: {response.status_code}")
         return False
 
+def calculate_tif_mean(tif_file):
+    """Calculate the mean value of a GeoTIFF file."""
+    with rasterio.open(tif_file) as src:
+        data = src.read(1)
+        # Filter out no data values (assuming they're very negative or 0)
+        valid_data = data[data > -9999]
+        valid_data = valid_data[valid_data != 0]
+        if len(valid_data) > 0:
+            return float(np.mean(valid_data))
+        else:
+            return None
+
+def download_and_process_landsat_angles(pair, site_name, temp_dir, region, landsat_date):
+    """Download Landsat angle bands, calculate means, and return the values."""
+    angle_means = {}
+    
+    # Download each angle band to a temporary location
+    for band_code, angle_name in LANDSAT_ANGLES.items():
+        temp_file = os.path.join(temp_dir, f'temp_landsat_{angle_name}.tif')
+        
+        success = download_single_band(
+            pair['landsat_angles'], band_code, region, 30, temp_file, LANDSAT_PATCH_SIZE
+        )
+        
+        if success:
+            # Calculate mean
+            mean_value = calculate_tif_mean(temp_file)
+            # Divide by 100 for Landsat angles
+            if mean_value is not None:
+                mean_value = mean_value / 100.0
+            angle_means[angle_name] = mean_value
+            print(f"Calculated mean for {angle_name}: {mean_value}")
+            # Delete the temporary file
+            os.remove(temp_file)
+            time.sleep(0.1)
+        else:
+            angle_means[angle_name] = None
+    
+    return angle_means
+
 def process_site(site):
     """Process a single site to find and download image pairs."""
     site_name = site['name']
@@ -190,6 +304,10 @@ def process_site(site):
     # Create site directory
     site_dir = os.path.join(OUTPUT_DIR, site_name)
     os.makedirs(site_dir, exist_ok=True)
+    
+    # Create temporary directory for angle calculation
+    temp_dir = os.path.join(site_dir, 'temp')
+    os.makedirs(temp_dir, exist_ok=True)
     
     # Find matching image pairs
     point = ee.Geometry.Point([site['lon'], site['lat']])
@@ -222,12 +340,38 @@ def process_site(site):
                               for band_desc in LANDSAT_BANDS.values())
         all_sentinel_exist = all(os.path.exists(os.path.join(sentinel_dir, f'sentinel2_{site_name}_{sentinel_date}_{band_desc}.tif')) 
                                for band_desc in SENTINEL_BANDS.values())
+        angles_json_exists = os.path.exists(os.path.join(date_dir, 'angles.json'))
         
-        if all_landsat_exist and all_sentinel_exist:
+        if all_landsat_exist and all_sentinel_exist and angles_json_exists:
             print(f"Pair {i+1}/{len(pairs)} for {site_name} already downloaded, skipping")
             pairs_skipped += 1
             continue
+        
+        # Process angles first to avoid downloading spectral data if angle processing fails
+        if not angles_json_exists:
+            # Get Landsat angle means
+            landsat_angle_means = download_and_process_landsat_angles(
+                pair, site_name, temp_dir, region, landsat_date
+            )
             
+            # Already have Sentinel angle means from the metadata
+            sentinel_angle_means = pair['sentinel_angle_means']
+            
+            # Save both sets of angles to a JSON file
+            angles_data = {
+                'landsat': {
+                    'date': landsat_date,
+                    'angles': landsat_angle_means
+                },
+                'sentinel': {
+                    'date': sentinel_date,
+                    'angles': sentinel_angle_means
+                }
+            }
+            
+            with open(os.path.join(date_dir, 'angles.json'), 'w') as f:
+                json.dump(angles_data, f, indent=2)
+        
         # Save metadata about the pair
         metadata_file = os.path.join(date_dir, 'metadata.json')
         if not os.path.exists(metadata_file):
@@ -274,20 +418,26 @@ def process_site(site):
                         sentinel_success = False
                         break
                     # Small delay between band downloads
-                    time.sleep(0.5)
+                    time.sleep(0.1)
             
             if sentinel_success:
                 pairs_downloaded += 1
                 print(f"Downloaded pair {i+1}/{len(pairs)} for {site_name}")
         
         # Add a delay to avoid rate limiting
-        time.sleep(1)
+        time.sleep(0.001)
+    
+    # Clean up temp directory
+    try:
+        shutil.rmtree(temp_dir)
+    except Exception as e:
+        print(f"Warning: Could not remove temp directory: {e}")
     
     print(f"Site {site_name} summary: {pairs_downloaded} pairs downloaded, {pairs_skipped} pairs skipped")
 
 # Process all sites
 def main():
-    print(f"Starting SatelliteTranslate data collection (separate bands)")
+    print(f"Starting SatelliteTranslate data collection (with mean angles)")
     print(f"Time range: {START_DATE} to {END_DATE}")
     print(f"Max cloud cover: {MAX_CLOUD_COVER}%")
     print(f"Max days between acquisitions: {MAX_DAYS_DIFFERENCE}")
@@ -296,22 +446,26 @@ def main():
     print(f"Sites to process: {len(SITES)}")
     print(f"Landsat bands: {', '.join([f'{k} ({v})' for k, v in LANDSAT_BANDS.items()])}")
     print(f"Sentinel bands: {', '.join([f'{k} ({v})' for k, v in SENTINEL_BANDS.items()])}")
+    print(f"Using mean angles for both satellites stored in angles.json")
     
     # Create a summary file
     with open(os.path.join(OUTPUT_DIR, 'dataset_info.txt'), 'w') as f:
-        f.write(f"SatelliteTranslate Dataset (separate bands)\n")
+        f.write(f"SatelliteTranslate Dataset (with mean angles)\n")
         f.write(f"Created: {datetime.datetime.now()}\n")
         f.write(f"Time range: {START_DATE} to {END_DATE}\n")
         f.write(f"Resolution transformation: Landsat 8 (30m) to Sentinel-2 (10m)\n")
         f.write(f"Patch sizes: Landsat {LANDSAT_PATCH_SIZE}x{LANDSAT_PATCH_SIZE}, Sentinel {SENTINEL_PATCH_SIZE}x{SENTINEL_PATCH_SIZE}\n")
         f.write(f"Landsat bands: {', '.join([f'{k} ({v})' for k, v in LANDSAT_BANDS.items()])}\n")
         f.write(f"Sentinel bands: {', '.join([f'{k} ({v})' for k, v in SENTINEL_BANDS.items()])}\n")
+        f.write(f"Angle information: Scene-average values stored in angles.json\n")
+        f.write(f"  - Landsat angles: {', '.join([f'{v}' for v in LANDSAT_ANGLES.values()])}\n")
+        f.write(f"  - Sentinel angles: {', '.join([f'{v}' for v in SENTINEL_ANGLE_PROPERTIES.values()])}\n")
         f.write(f"Sites:\n")
         for site in SITES:
             f.write(f"  - {site['name']}: {site['description']} ({site['lat']}, {site['lon']})\n")
     
     # Process sites with multiple workers
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=4) as executor:
         executor.map(process_site, SITES)
     
     print(f"Data collection complete. Check the {OUTPUT_DIR} directory for results.")
