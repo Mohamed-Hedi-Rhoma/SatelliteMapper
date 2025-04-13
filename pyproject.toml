@@ -1,0 +1,28 @@
+[project]
+authors = [{name = "Mohamedhedi12", email = "93082070+Mohamedhedi12@users.noreply.github.com"}]
+dependencies = []
+name = "Satellitetranslate"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tool.pixi.pypi-dependencies]
+satellitetranslate = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+numpy = ">=2.2.4,<3"
+requests = ">=2.32.3,<3"
+earthengine-api = ">=1.5.9,<2"
+matplotlib = ">=3.10.1,<4"
+rasterio = ">=1.4.3,<2"
+pandas = ">=2.2.3,<3"
+tqdm = ">=4.67.1,<5"
