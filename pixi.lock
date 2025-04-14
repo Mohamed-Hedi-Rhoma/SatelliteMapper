@@ -2492,7 +2492,7 @@ packages:
 - pypi: .
   name: satellitetranslate
   version: 0.1.0
-  sha256: a3f5bde5d48c60e6990387ab9bded37ab9d8f4ca8faf6b90bb725be3c41c528e
+  sha256: 29648324bb543e385f8e43cf82ad1a781d2032ef14dca88b73be816e7c1289f8
   requires_python: '>=3.11'
   editable: true
 - conda: https://conda.anaconda.org/conda-forge/win-64/scipy-1.15.2-py313h2eca4b9_0.conda

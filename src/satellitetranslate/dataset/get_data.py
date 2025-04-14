@@ -23,41 +23,73 @@ SITES = [
     {"name": "yellowstone", "lat": 44.4280, "lon": -110.5885, "description": "National Park"},
     {"name": "everglades", "lat": 25.2866, "lon": -80.8987, "description": "Wetlands"},
     {"name": "grand_canyon", "lat": 36.0544, "lon": -112.2583, "description": "Canyon/Desert"},
+    {"name": "chesapeake_bay", "lat": 37.8395, "lon": -76.0193, "description": "Estuary/Coastal"},
+    {"name": "death_valley", "lat": 36.5323, "lon": -116.9325, "description": "Desert/Basin"},
+    {"name": "great_lakes", "lat": 45.0000, "lon": -83.0000, "description": "Freshwater Lakes"},
+    {"name": "vancouver_island", "lat": 49.6819, "lon": -125.4514, "description": "Temperate Rainforest"},
+    {"name": "quebec_taiga", "lat": 52.9399, "lon": -73.5491, "description": "Boreal Forest"},
+    {"name": "mexico_city", "lat": 19.4326, "lon": -99.1332, "description": "Urban/High Altitude"},
+    {"name": "sonoran_desert", "lat": 32.2528, "lon": -112.8714, "description": "Desert Ecosystem"},
     
     # South America
     {"name": "amazon", "lat": -3.4653, "lon": -62.2159, "description": "Tropical Forest"},
     {"name": "atacama", "lat": -24.5000, "lon": -69.2500, "description": "Desert"},
     {"name": "patagonia", "lat": -49.3304, "lon": -72.8864, "description": "Glaciers/Mountains"},
+    {"name": "pantanal", "lat": -17.6117, "lon": -57.4286, "description": "Wetlands/Savanna"},
+    {"name": "buenos_aires", "lat": -34.6037, "lon": -58.3816, "description": "Urban/Pampas"},
+    {"name": "galapagos", "lat": -0.7393, "lon": -90.3305, "description": "Volcanic Islands"},
     
     # Europe
     {"name": "swiss_alps", "lat": 46.8182, "lon": 8.2275, "description": "Mountains"},
     {"name": "netherlands", "lat": 52.1326, "lon": 5.2913, "description": "Agricultural/Flatlands"},
     {"name": "venice", "lat": 45.4408, "lon": 12.3155, "description": "Urban/Water"},
+    {"name": "pyrenees", "lat": 42.6582, "lon": 1.0057, "description": "Mountain Range"},
+    {"name": "danube_delta", "lat": 45.0000, "lon": 29.0000, "description": "River Delta/Wetlands"},
+    {"name": "iceland", "lat": 64.9631, "lon": -19.0208, "description": "Volcanic/Glaciers"},
+    {"name": "london", "lat": 51.5074, "lon": -0.1278, "description": "Urban/River"},
+    {"name": "scandinavian_tundra", "lat": 68.3700, "lon": 18.8300, "description": "Tundra/Arctic"},
     
     # Africa
     {"name": "sahel", "lat": 13.5137, "lon": 2.1098, "description": "Desert/Savanna Transition"},
     {"name": "nile_delta", "lat": 30.8358, "lon": 31.0234, "description": "River Delta/Agriculture"},
     {"name": "kilimanjaro", "lat": -3.0674, "lon": 37.3556, "description": "Mountain/Forest"},
+    {"name": "serengeti", "lat": -2.3333, "lon": 34.8333, "description": "Savanna/Grassland"},
+    {"name": "congo_basin", "lat": -0.7832, "lon": 23.6558, "description": "Tropical Rainforest"},
+    {"name": "sahara", "lat": 23.4162, "lon": 25.6628, "description": "Desert"},
+    {"name": "lake_victoria", "lat": -1.2650, "lon": 33.2418, "description": "Freshwater Lake"},
+    {"name": "okavango_delta", "lat": -19.2330, "lon": 22.8755, "description": "Inland Delta"},
     
     # Asia
     {"name": "dubai", "lat": 25.2048, "lon": 55.2708, "description": "Urban + Desert"},
     {"name": "ganges_delta", "lat": 22.7749, "lon": 89.5565, "description": "River Delta/Dense Population"},
     {"name": "borneo", "lat": 0.9619, "lon": 114.5548, "description": "Tropical Rainforest"},
+    {"name": "aral_sea", "lat": 45.0000, "lon": 60.0000, "description": "Shrinking Lake/Desertification"},
+    {"name": "siberian_taiga", "lat": 60.0000, "lon": 100.0000, "description": "Boreal Forest"},
+    {"name": "himalaya", "lat": 28.2460, "lon": 85.3131, "description": "High Mountains"},
+    {"name": "tokyo", "lat": 35.6762, "lon": 139.6503, "description": "Urban/Coastal"},
+    {"name": "mekong_delta", "lat": 10.0341, "lon": 105.7841, "description": "River Delta/Agriculture"},
+    {"name": "gobi_desert", "lat": 42.5676, "lon": 103.9552, "description": "Cold Desert"},
+    {"name": "baikal", "lat": 53.5000, "lon": 108.0000, "description": "Deep Lake/Forest"},
     
     # Australia/Oceania
     {"name": "great_barrier", "lat": -18.2871, "lon": 147.6992, "description": "Coral Reef/Ocean"},
     {"name": "uluru", "lat": -25.3444, "lon": 131.0369, "description": "Arid Interior"},
-    {"name": "new_zealand", "lat": -43.5945, "lon": 170.2386, "description": "Mountains/Glaciers"}
+    {"name": "new_zealand", "lat": -43.5945, "lon": 170.2386, "description": "Mountains/Glaciers"},
+    {"name": "sydney", "lat": -33.8688, "lon": 151.2093, "description": "Urban/Coastal"},
+    {"name": "great_victoria_desert", "lat": -29.0000, "lon": 127.0000, "description": "Desert"},
+    {"name": "tasmania", "lat": -42.0000, "lon": 146.0000, "description": "Temperate Forest Island"},
+    {"name": "papua_highlands", "lat": -4.0000, "lon": 141.0000, "description": "Tropical Mountain Forest"},
+    {"name": "coral_sea", "lat": -18.0000, "lon": 157.0000, "description": "Open Ocean/Reefs"}
 ]
 
 # Time range
-START_DATE = '2021-01-01'
-END_DATE = '2023-12-31'
+START_DATE = '2015-01-01'
+END_DATE = '2024-12-31'
 
 # Image parameters
 LANDSAT_PATCH_SIZE = 128  # Size in pixels for Landsat (30m resolution)
 SENTINEL_PATCH_SIZE = 384  # Size in pixels for Sentinel (10m resolution) - 3x larger to cover same area
-MAX_CLOUD_COVER = 20  # Maximum cloud cover percentage
+MAX_CLOUD_COVER = 10  # Maximum cloud cover percentage
 MAX_DAYS_DIFFERENCE = 4  # Maximum days between Landsat and Sentinel acquisitions
 OUTPUT_DIR = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data'
 
@@ -71,7 +103,8 @@ LANDSAT_BANDS = {
     'SR_B4': 'red',
     'SR_B5': 'nir',
     'SR_B6': 'swir1',
-    'SR_B7': 'swir2'
+    'SR_B7': 'swir2',
+    'QA_PIXEL': 'qa_pixel'  
 }
 
 SENTINEL_BANDS = {
@@ -80,7 +113,8 @@ SENTINEL_BANDS = {
     'B4': 'red',
     'B8': 'nir',
     'B11': 'swir1',
-    'B12': 'swir2'
+    'B12': 'swir2',
+    'QA60': 'qa_pixel'  
 }
 
 # Define angle bands for mean calculation

@@ -3,3 +3,4 @@
 .pixi
 *.egg-info
 data
+data_pth
