@@ -6,10 +6,12 @@ import numpy as np
 from datetime import timedelta
 import requests
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import rasterio
 import shutil
 import tempfile
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Initialize Earth Engine
 ee.Authenticate()  # You'll need to authenticate first
@@ -132,6 +134,27 @@ SENTINEL_ANGLE_PROPERTIES = {
     'MEAN_INCIDENCE_AZIMUTH_ANGLE_B2': 'view_azimuth',
     'MEAN_INCIDENCE_ZENITH_ANGLE_B2': 'view_zenith'
 }
+
+# Create optimized session for faster downloads
+def create_optimized_session():
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=5,  # Maximum number of retries
+        backoff_factor=0.5,  # Backoff factor for retry delay
+        status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+        allowed_methods=["GET"]  # Only retry on GET
+    )
+    adapter = HTTPAdapter(
+        pool_connections=25,  # Increase connection pool size
+        pool_maxsize=25,      # Increase max connections
+        max_retries=retry_strategy
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+# Create a global session for reuse
+session = create_optimized_session()
 
 # Define functions
 def get_landsat_collection(start_date, end_date, cloud_cover):
@@ -279,15 +302,20 @@ def download_single_band(image, band_name, geometry, scale, filename, patch_size
         'bands': [band_name]
     })
     
-    # Download the image
-    response = requests.get(url)
-    if response.status_code == 200:
+    # Download the image with retry and stream
+    try:
+        response = session.get(url, stream=True)
+        response.raise_for_status()
+        
+        # Use streaming to avoid memory issues with large files
         with open(filename, 'wb') as f:
-            f.write(response.content)
+            for chunk in response.iter_content(chunk_size=1024*1024):  # 1MB chunks
+                f.write(chunk)
+                
         print(f"Successfully downloaded: {filename}")
         return True
-    else:
-        print(f"Failed to download {filename}: {response.status_code}")
+    except Exception as e:
+        print(f"Failed to download {filename}: {str(e)}")
         return False
 
 def calculate_tif_mean(tif_file):
@@ -302,31 +330,109 @@ def calculate_tif_mean(tif_file):
         else:
             return None
 
-def download_and_process_landsat_angles(pair, site_name, temp_dir, region, landsat_date):
-    """Download Landsat angle bands, calculate means, and return the values."""
-    angle_means = {}
+def download_bands_parallel(image, bands_dict, geometry, scale, output_dir, prefix, site_name, date_str, patch_size, max_workers=8):
+    """Download multiple bands in parallel using thread pool."""
+    failed_bands = []
     
-    # Download each angle band to a temporary location
-    for band_code, angle_name in LANDSAT_ANGLES.items():
-        temp_file = os.path.join(temp_dir, f'temp_landsat_{angle_name}.tif')
-        
-        success = download_single_band(
-            pair['landsat_angles'], band_code, region, 30, temp_file, LANDSAT_PATCH_SIZE
-        )
+    # Create temporary directory for partial downloads to avoid corrupted files
+    temp_download_dir = os.path.join(output_dir, 'temp_downloads')
+    os.makedirs(temp_download_dir, exist_ok=True)
+    
+    def download_band_task(band_code, band_desc):
+        final_filename = os.path.join(output_dir, f'{prefix}_{site_name}_{date_str}_{band_desc}.tif')
+        if os.path.exists(final_filename):
+            return band_code, band_desc, True
+            
+        # Download to temporary file first
+        temp_filename = os.path.join(temp_download_dir, f'temp_{prefix}_{band_code}_{int(time.time())}.tif')
+        success = download_single_band(image, band_code, geometry, scale, temp_filename, patch_size)
         
         if success:
-            # Calculate mean
-            mean_value = calculate_tif_mean(temp_file)
-            # Divide by 100 for Landsat angles
-            if mean_value is not None:
-                mean_value = mean_value / 100.0
-            angle_means[angle_name] = mean_value
-            print(f"Calculated mean for {angle_name}: {mean_value}")
-            # Delete the temporary file
-            os.remove(temp_file)
-            time.sleep(0.1)
+            # Move to final location
+            shutil.move(temp_filename, final_filename)
+            return band_code, band_desc, True
         else:
-            angle_means[angle_name] = None
+            # Clean up temp file if it exists
+            try:
+                if os.path.exists(temp_filename):
+                    os.remove(temp_filename)
+            except:
+                pass
+            return band_code, band_desc, False
+    
+    # Use thread pool for band downloads
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all download tasks
+        future_to_band = {
+            executor.submit(download_band_task, band_code, band_desc): (band_code, band_desc)
+            for band_code, band_desc in bands_dict.items()
+        }
+        
+        # Process completed tasks
+        for future in as_completed(future_to_band):
+            band_code, band_desc, success = future.result()
+            if not success:
+                failed_bands.append((band_code, band_desc))
+    
+    # Clean up temporary directory
+    try:
+        shutil.rmtree(temp_download_dir)
+    except Exception as e:
+        print(f"Warning: Could not remove temp download directory: {e}")
+    
+    # Return success if all bands downloaded successfully
+    return len(failed_bands) == 0
+
+def download_and_process_landsat_angles(pair, site_name, temp_dir, region, landsat_date):
+    """Download Landsat angle bands, calculate means, and return the values with parallel processing."""
+    angle_means = {}
+    futures = []
+    
+    # Process angle bands in parallel
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for band_code, angle_name in LANDSAT_ANGLES.items():
+            temp_file = os.path.join(temp_dir, f'temp_landsat_{angle_name}.tif')
+            
+            # Skip if already processed
+            if angle_name in angle_means:
+                continue
+                
+            # Submit download task
+            def process_angle_band(band_code, angle_name, temp_file):
+                success = download_single_band(
+                    pair['landsat_angles'], band_code, region, 30, temp_file, LANDSAT_PATCH_SIZE
+                )
+                
+                if success:
+                    # Calculate mean
+                    mean_value = calculate_tif_mean(temp_file)
+                    # Divide by 100 for Landsat angles
+                    if mean_value is not None:
+                        mean_value = mean_value / 100.0
+                    
+                    # Clean up temp file
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                        
+                    return angle_name, mean_value
+                else:
+                    return angle_name, None
+            
+            # Submit task
+            future = executor.submit(process_angle_band, band_code, angle_name, temp_file)
+            futures.append((future, angle_name))
+            
+        # Get results
+        for future, angle_name in futures:
+            try:
+                angle_name, mean_value = future.result()
+                angle_means[angle_name] = mean_value
+                print(f"Calculated mean for {angle_name}: {mean_value}")
+            except Exception as e:
+                print(f"Error processing angle {angle_name}: {e}")
+                angle_means[angle_name] = None
     
     return angle_means
 
@@ -423,43 +529,45 @@ def process_site(site):
                     'sentinel_bands': list(SENTINEL_BANDS.keys())
                 }, f, indent=2, default=str)
         
-        # Download each Landsat band
-        landsat_success = True
-        for band_code, band_desc in LANDSAT_BANDS.items():
-            landsat_file = os.path.join(landsat_dir, f'landsat8_{site_name}_{landsat_date}_{band_desc}.tif')
+        # Download all Landsat bands in parallel
+        if not all_landsat_exist:
+            landsat_success = download_bands_parallel(
+                pair['landsat'],
+                LANDSAT_BANDS,
+                region,
+                30,
+                landsat_dir,
+                'landsat8',
+                site_name,
+                landsat_date,
+                LANDSAT_PATCH_SIZE
+            )
+        else:
+            landsat_success = True
             
-            if not os.path.exists(landsat_file):
-                band_success = download_single_band(
-                    pair['landsat'], band_code, region, 30, landsat_file, LANDSAT_PATCH_SIZE
-                )
-                if not band_success:
-                    landsat_success = False
-                    break
-                # Small delay between band downloads
-                time.sleep(0.5)
-        
-        # Download each Sentinel band if Landsat was successful
-        sentinel_success = True
-        if landsat_success:
-            for band_code, band_desc in SENTINEL_BANDS.items():
-                sentinel_file = os.path.join(sentinel_dir, f'sentinel2_{site_name}_{sentinel_date}_{band_desc}.tif')
-                
-                if not os.path.exists(sentinel_file):
-                    band_success = download_single_band(
-                        pair['sentinel'], band_code, region, 10, sentinel_file, SENTINEL_PATCH_SIZE
-                    )
-                    if not band_success:
-                        sentinel_success = False
-                        break
-                    # Small delay between band downloads
-                    time.sleep(0.1)
+        # Download all Sentinel bands in parallel if Landsat was successful
+        sentinel_success = False
+        if landsat_success and not all_sentinel_exist:
+            sentinel_success = download_bands_parallel(
+                pair['sentinel'],
+                SENTINEL_BANDS,
+                region,
+                10,
+                sentinel_dir,
+                'sentinel2',
+                site_name,
+                sentinel_date,
+                SENTINEL_PATCH_SIZE
+            )
+        elif landsat_success and all_sentinel_exist:
+            sentinel_success = True
             
-            if sentinel_success:
-                pairs_downloaded += 1
-                print(f"Downloaded pair {i+1}/{len(pairs)} for {site_name}")
+        if landsat_success and sentinel_success and not (all_landsat_exist and all_sentinel_exist):
+            pairs_downloaded += 1
+            print(f"Downloaded pair {i+1}/{len(pairs)} for {site_name}")
         
-        # Add a delay to avoid rate limiting
-        time.sleep(0.001)
+        # Small delay between pairs to avoid overwhelming GEE
+        time.sleep(0.1)
     
     # Clean up temp directory
     try:
@@ -468,8 +576,8 @@ def process_site(site):
         print(f"Warning: Could not remove temp directory: {e}")
     
     print(f"Site {site_name} summary: {pairs_downloaded} pairs downloaded, {pairs_skipped} pairs skipped")
+    return pairs_downloaded, pairs_skipped
 
-# Process all sites
 def main():
     print(f"Starting SatelliteTranslate data collection (with mean angles)")
     print(f"Time range: {START_DATE} to {END_DATE}")
@@ -481,6 +589,7 @@ def main():
     print(f"Landsat bands: {', '.join([f'{k} ({v})' for k, v in LANDSAT_BANDS.items()])}")
     print(f"Sentinel bands: {', '.join([f'{k} ({v})' for k, v in SENTINEL_BANDS.items()])}")
     print(f"Using mean angles for both satellites stored in angles.json")
+    print(f"Using optimized parallel download with connection pooling")
     
     # Create a summary file
     with open(os.path.join(OUTPUT_DIR, 'dataset_info.txt'), 'w') as f:
@@ -498,11 +607,32 @@ def main():
         for site in SITES:
             f.write(f"  - {site['name']}: {site['description']} ({site['lat']}, {site['lon']})\n")
     
-    # Process sites with multiple workers
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        executor.map(process_site, SITES)
+    # Process sites with thread pool
+    total_pairs_downloaded = 0
+    total_pairs_skipped = 0
     
-    print(f"Data collection complete. Check the {OUTPUT_DIR} directory for results.")
+    # Adjust max_workers based on your system's capabilities 
+    # Usually number of CPU cores * 2 is a good starting point
+    max_site_workers = 6  # Adjust based on your system
+    
+    with ThreadPoolExecutor(max_workers=max_site_workers) as executor:
+        future_to_site = {executor.submit(process_site, site): site for site in SITES}
+        
+        # Process results as they complete
+        for future in as_completed(future_to_site):
+            site = future_to_site[future]
+            try:
+                pairs_downloaded, pairs_skipped = future.result()
+                total_pairs_downloaded += pairs_downloaded
+                total_pairs_skipped += pairs_skipped
+                print(f"Completed site {site['name']}")
+            except Exception as e:
+                print(f"Error processing site {site['name']}: {e}")
+    
+    print(f"Data collection complete.")
+    print(f"Total pairs downloaded: {total_pairs_downloaded}")
+    print(f"Total pairs skipped: {total_pairs_skipped}")
+    print(f"Check the {OUTPUT_DIR} directory for results.")
 
 if __name__ == "__main__":
     main()
