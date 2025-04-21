@@ -1,399 +1,587 @@
 import os
-import numpy as np
+import glob
+import json
 import torch
+import numpy as np
 import rasterio
 from tqdm import tqdm
-from pathlib import Path
 import random
-import json
-import copy
-import time
+import shutil
+import gc
 
-def prepare_satellite_dataset(base_dir, output_dir, val_ratio=0.1, test_ratio=0.1, seed=42):
+# Define directories
+DATA_DIR = "C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data_prepared"
+OUTPUT_DIR = "C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/pth_data"
+
+# Define bands
+LANDSAT_BANDS = ['blue.tif', 'green.tif', 'red.tif', 'nir.tif', 'swir1.tif', 'swir2.tif']
+SENTINEL_10M_BANDS = ['blue.tif', 'green.tif', 'red.tif', 'nir.tif']
+SENTINEL_20M_BANDS = ['swir1.tif', 'swir2.tif']
+
+# Define target sizes
+LANDSAT_SIZE = (128, 128)
+SENTINEL_10M_SIZE = (384, 384)
+SENTINEL_20M_SIZE = (192, 192)
+
+# Define split ratios
+TRAIN_RATIO = 0.85
+VALID_RATIO = 0.10
+TEST_RATIO = 0.05  # remaining 5%
+
+# Define batch size for memory-friendly processing
+BATCH_SIZE = 25  # Further reduced to avoid memory issues
+
+def read_angles_json(json_path):
+    """Read angles from JSON file and return as a list of 4 values: SZA, VZA, SAA, VAA."""
+    try:
+        with open(json_path, 'r') as f:
+            angles_data = json.load(f)
+        
+        # Create a list of the 4 angle values, using 0.0 as a fallback if any are missing
+        angles = [
+            angles_data.get("SZA", 0.0) if angles_data.get("SZA") is not None else 0.0,
+            angles_data.get("VZA", 0.0) if angles_data.get("VZA") is not None else 0.0,
+            angles_data.get("SAA", 0.0) if angles_data.get("SAA") is not None else 0.0,
+            angles_data.get("VAA", 0.0) if angles_data.get("VAA") is not None else 0.0
+        ]
+        return angles
+    except Exception as e:
+        print(f"Error reading angles from {json_path}: {e}")
+        # Return zeros if there's an error
+        return [0.0, 0.0, 0.0, 0.0]
+
+def read_and_process_image(file_path, target_size):
     """
-    Prepare satellite dataset for PyTorch by creating tensor files.
-    
-    Args:
-        base_dir (str): Base directory containing the scaled satellite data
-        output_dir (str): Output directory for the tensor files
-        val_ratio (float): Ratio of validation data (default: 0.1)
-        test_ratio (float): Ratio of test data (default: 0.1)
-        seed (int): Random seed for reproducibility
+    Read an image and process it to the target size.
+    Only crop if the image exceeds the target size.
     """
-    # Start time
-    start_time = time.time()
-    print(f"\n{'='*80}")
-    print(f"STARTING DATASET PREPARATION")
-    print(f"{'='*80}")
-    print(f"Base directory: {base_dir}")
-    print(f"Output directory: {output_dir}")
-    print(f"Validation ratio: {val_ratio}, Test ratio: {test_ratio}, Seed: {seed}")
-    
-    # Set random seed for reproducibility
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.manual_seed(seed)
-    print(f"Random seeds set to {seed}")
-    
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Output directory created/confirmed: {output_dir}")
-    
-    # List of band names in the order we want them
-    landsat_bands = ['blue', 'green', 'red', 'nir', 'swir1', 'swir2']
-    sentinel_bands = ['blue', 'green', 'red', 'nir', 'swir1', 'swir2']
-    print(f"Landsat bands (in order): {landsat_bands}")
-    print(f"Sentinel bands (in order): {sentinel_bands}")
-    
-    # Get all valid data pairs
-    print(f"\n{'-'*80}")
-    print("Finding all scaled image pairs...")
-    pairs = []
-    
-    # Site and date counters
-    total_sites = 0
-    total_dates = 0
-    valid_pairs = 0
-    invalid_pairs = 0
-    missing_landsat = 0
-    missing_sentinel = 0
-    missing_bands = 0
-    missing_angles = 0
-    
-    # Get all site folders
-    site_folders = [f for f in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, f)) and not f.startswith('.')]
-    total_sites = len(site_folders)
-    print(f"Found {total_sites} site folders")
-    
-    for site in tqdm(site_folders, desc="Processing sites"):
-        site_path = os.path.join(base_dir, site)
-        site_dates = 0
-        site_valid_pairs = 0
-        
-        print(f"\n{'-'*70}")
-        print(f"Processing site: {site}")
-        
-        # Get all scaled date folders for the site
-        date_folders = [d for d in os.listdir(site_path) if os.path.isdir(os.path.join(site_path, d)) and d.endswith('_scaled')]
-        site_dates = len(date_folders)
-        total_dates += site_dates
-        print(f"Found {site_dates} scaled date folders for site {site}")
-        
-        for date in date_folders:
-            date_path = os.path.join(site_path, date)
-            landsat_dir = os.path.join(date_path, 'landsat8')
-            sentinel_dir = os.path.join(date_path, 'sentinel2')
+    try:
+        with rasterio.open(file_path) as src:
+            data = src.read(1).astype(np.float32)
             
-            print(f"  Checking pair: {site}/{date}")
+            h, w = data.shape
+            target_h, target_w = target_size
             
-            # Check if both landsat and sentinel data exist
-            if not os.path.exists(landsat_dir):
-                print(f"    Missing Landsat directory at {landsat_dir}")
-                missing_landsat += 1
-                invalid_pairs += 1
-                continue
+            # Only crop if the image exceeds the target size
+            if h > target_h or w > target_w:
+                # Calculate crop coordinates to center the crop
+                start_h = max(0, (h - target_h) // 2)
+                start_w = max(0, (w - target_w) // 2)
+                end_h = min(h, start_h + target_h)
+                end_w = min(w, start_w + target_w)
                 
-            if not os.path.exists(sentinel_dir):
-                print(f"    Missing Sentinel directory at {sentinel_dir}")
-                missing_sentinel += 1
-                invalid_pairs += 1
-                continue
-            
-            # Check if all bands exist for both sensors
-            landsat_files = {}
-            sentinel_files = {}
-            
-            # Find all band files
-            for file in os.listdir(landsat_dir):
-                if file.endswith('.tif'):
-                    # Extract band name from filename (e.g., landsat8_site_date_blue.tif)
-                    for band in landsat_bands:
-                        if f"_{band}.tif" in file:
-                            landsat_files[band] = os.path.join(landsat_dir, file)
-            
-            for file in os.listdir(sentinel_dir):
-                if file.endswith('.tif'):
-                    for band in sentinel_bands:
-                        if f"_{band}.tif" in file:
-                            sentinel_files[band] = os.path.join(sentinel_dir, file)
-            
-            # Print found bands
-            print(f"    Found Landsat bands: {list(landsat_files.keys())}")
-            print(f"    Found Sentinel bands: {list(sentinel_files.keys())}")
-            
-            # Check if all bands are present and if angles.json exists
-            angles_file = os.path.join(date_path, 'angles.json')
-            
-            if len(landsat_files) != len(landsat_bands) or len(sentinel_files) != len(sentinel_bands):
-                print(f"    Missing bands: Landsat has {len(landsat_files)}/{len(landsat_bands)}, Sentinel has {len(sentinel_files)}/{len(sentinel_bands)}")
-                missing_bands += 1
-                invalid_pairs += 1
-                continue
+                # Crop the image
+                data = data[start_h:end_h, start_w:end_w]
                 
-            if not os.path.exists(angles_file):
-                print(f"    Missing angles.json file at {angles_file}")
-                missing_angles += 1
-                invalid_pairs += 1
-                continue
-            
-            # Read the angles.json file
-            with open(angles_file, 'r') as f:
-                angles_data = json.load(f)
-                print(f"    Successfully read angles.json")
-            
-            # Valid pair found
-            pairs.append({
-                'site': site,
-                'date': date,
-                'landsat_files': landsat_files,
-                'sentinel_files': sentinel_files,
-                'path': date_path,
-                'angles': angles_data
-            })
-            
-            valid_pairs += 1
-            site_valid_pairs += 1
-            print(f"    [OK] Valid pair found: {site}/{date}")
+                # If the cropped image is still smaller than target (shouldn't happen if properly cropped)
+                if data.shape[0] < target_h or data.shape[1] < target_w:
+                    # Create a zero-filled array of target size
+                    padded_data = np.zeros(target_size, dtype=np.float32)
+                    # Place the data in the center
+                    pad_h = (target_h - data.shape[0]) // 2
+                    pad_w = (target_w - data.shape[1]) // 2
+                    padded_data[pad_h:pad_h+data.shape[0], pad_w:pad_w+data.shape[1]] = data
+                    data = padded_data
+            elif h < target_h or w < target_w:
+                # If the image is smaller than target size, pad with zeros
+                padded_data = np.zeros(target_size, dtype=np.float32)
+                # Place the data in the center
+                pad_h = (target_h - h) // 2
+                pad_w = (target_w - w) // 2
+                padded_data[pad_h:pad_h+h, pad_w:pad_w+w] = data
+                data = padded_data
+                
+            return data
+    except Exception as e:
+        print(f"Error reading image {file_path}: {e}")
+        # Return zeros if there's an error
+        return np.zeros(target_size, dtype=np.float32)
+
+def collect_data_paths():
+    """
+    Collect paths to all data points, ensuring consistent ordering across datasets.
+    Returns a list of tuples: (landsat_dir, sentinel_dir, site_name, acq_date)
+    """
+    data_paths = []
+    
+    # Get all site directories
+    site_dirs = [d for d in glob.glob(os.path.join(DATA_DIR, "*")) 
+                if os.path.isdir(d) and not d.endswith("__pycache__")]
+    
+    for site_dir in sorted(site_dirs):
+        site_name = os.path.basename(site_dir)
         
-        print(f"  Site summary: {site_valid_pairs}/{site_dates} valid pairs for site {site}")
+        # Get all acquisition date directories
+        acq_dirs = [d for d in glob.glob(os.path.join(site_dir, "*")) 
+                    if os.path.isdir(d) and not d.endswith("__pycache__")]
+        
+        for acq_dir in sorted(acq_dirs):
+            acq_date = os.path.basename(acq_dir)
+            
+            # Define paths to Landsat and Sentinel data
+            landsat_dir = os.path.join(acq_dir, "landsat8")
+            sentinel_dir = os.path.join(acq_dir, "sentinel2")
+            
+            # Check if both directories exist
+            if os.path.exists(landsat_dir) and os.path.exists(sentinel_dir):
+                # Verify that all required band files exist for Landsat
+                landsat_bands_exist = all(os.path.exists(os.path.join(landsat_dir, band)) for band in LANDSAT_BANDS)
+                
+                # Verify that all required band files exist for Sentinel
+                sentinel_10m_bands_exist = all(os.path.exists(os.path.join(sentinel_dir, band)) for band in SENTINEL_10M_BANDS)
+                sentinel_20m_bands_exist = all(os.path.exists(os.path.join(sentinel_dir, band)) for band in SENTINEL_20M_BANDS)
+                
+                # Only add if all required files exist
+                if landsat_bands_exist and sentinel_10m_bands_exist and sentinel_20m_bands_exist:
+                    data_paths.append((landsat_dir, sentinel_dir, site_name, acq_date))
+                else:
+                    missing = []
+                    if not landsat_bands_exist:
+                        missing.append("Landsat bands")
+                    if not sentinel_10m_bands_exist:
+                        missing.append("Sentinel 10m bands")
+                    if not sentinel_20m_bands_exist:
+                        missing.append("Sentinel 20m bands")
+                    print(f"Skipping {site_name}/{acq_date} - Missing: {', '.join(missing)}")
     
-    print(f"\n{'-'*80}")
-    print(f"DATASET PAIRING SUMMARY:")
-    print(f"{'-'*80}")
-    print(f"Total sites: {total_sites}")
-    print(f"Total date folders: {total_dates}")
-    print(f"Valid pairs: {valid_pairs}")
-    print(f"Invalid pairs: {invalid_pairs}")
-    print(f"  - Missing Landsat: {missing_landsat}")
-    print(f"  - Missing Sentinel: {missing_sentinel}")
-    print(f"  - Missing bands: {missing_bands}")
-    print(f"  - Missing angles: {missing_angles}")
+    return data_paths
+
+def process_mini_batch(data_paths_batch, split_name, batch_idx):
+    """
+    Process a mini-batch of data paths and save to separate .pth files.
+    """
+    # Initialize data arrays for this mini-batch
+    landsat_data = []
+    sentinel_10m_data = []
+    sentinel_20m_data = []
+    landsat_angles = []
+    sentinel_angles = []
     
-    if valid_pairs == 0:
-        print("ERROR: No valid image pairs found. Exiting...")
+    # Process each data point in this mini-batch
+    for landsat_dir, sentinel_dir, site_name, acq_date in tqdm(data_paths_batch, 
+                                                            desc=f"Processing {split_name} batch {batch_idx}"):
+        try:
+            # Read Landsat bands
+            landsat_bands = []
+            for band in LANDSAT_BANDS:
+                band_path = os.path.join(landsat_dir, band)
+                band_data = read_and_process_image(band_path, LANDSAT_SIZE)
+                landsat_bands.append(band_data)
+            
+            # Read Sentinel 10m bands
+            sentinel_10m_bands = []
+            for band in SENTINEL_10M_BANDS:
+                band_path = os.path.join(sentinel_dir, band)
+                band_data = read_and_process_image(band_path, SENTINEL_10M_SIZE)
+                sentinel_10m_bands.append(band_data)
+            
+            # Read Sentinel 20m bands
+            sentinel_20m_bands = []
+            for band in SENTINEL_20M_BANDS:
+                band_path = os.path.join(sentinel_dir, band)
+                band_data = read_and_process_image(band_path, SENTINEL_20M_SIZE)
+                sentinel_20m_bands.append(band_data)
+            
+            # Read angles
+            landsat_angles_path = os.path.join(landsat_dir, "angles.json")
+            sentinel_angles_path = os.path.join(sentinel_dir, "angles.json")
+            
+            landsat_angles_data = read_angles_json(landsat_angles_path)
+            sentinel_angles_data = read_angles_json(sentinel_angles_path)
+            
+            # Append to lists
+            landsat_data.append(np.stack(landsat_bands))
+            sentinel_10m_data.append(np.stack(sentinel_10m_bands))
+            sentinel_20m_data.append(np.stack(sentinel_20m_bands))
+            landsat_angles.append(landsat_angles_data)
+            sentinel_angles.append(sentinel_angles_data)
+        except Exception as e:
+            print(f"Error processing {site_name}/{acq_date}: {e}")
+            continue
+    
+    # Convert lists to tensors
+    print(f"Converting {split_name} batch {batch_idx} to tensors...")
+    
+    # Handle empty batches
+    if not landsat_data:
+        print(f"Warning: Empty batch for {split_name} batch {batch_idx}")
         return
     
-    # Shuffle the pairs
-    random.shuffle(pairs)
-    print(f"Shuffled {len(pairs)} valid image pairs")
+    landsat_tensor = torch.tensor(np.stack(landsat_data))
+    sentinel_10m_tensor = torch.tensor(np.stack(sentinel_10m_data))
+    sentinel_20m_tensor = torch.tensor(np.stack(sentinel_20m_data))
+    landsat_angles_tensor = torch.tensor(np.stack(landsat_angles))
+    sentinel_angles_tensor = torch.tensor(np.stack(sentinel_angles))
     
-    # Split into train, validation, and test sets
-    num_samples = len(pairs)
-    num_test = int(num_samples * test_ratio)
-    num_val = int(num_samples * val_ratio)
-    num_train = num_samples - num_test - num_val
+    print(f"{split_name} batch {batch_idx} shapes:")
+    print(f"Landsat data: {landsat_tensor.shape}")
+    print(f"Sentinel 10m data: {sentinel_10m_tensor.shape}")
+    print(f"Sentinel 20m data: {sentinel_20m_tensor.shape}")
+    print(f"Landsat angles: {landsat_angles_tensor.shape}")
+    print(f"Sentinel angles: {sentinel_angles_tensor.shape}")
     
-    train_pairs = pairs[:num_train]
-    val_pairs = pairs[num_train:num_train+num_val]
-    test_pairs = pairs[num_train+num_val:]
+    # Save tensors to .pth files with batch index
+    batch_dir = os.path.join(OUTPUT_DIR, split_name)
+    os.makedirs(batch_dir, exist_ok=True)
     
-    print(f"\n{'-'*80}")
-    print(f"DATASET SPLITTING:")
-    print(f"{'-'*80}")
-    print(f"Total samples: {num_samples}")
-    print(f"Training samples: {num_train} ({num_train/num_samples:.2%})")
-    print(f"Validation samples: {num_val} ({num_val/num_samples:.2%})")
-    print(f"Testing samples: {num_test} ({num_test/num_samples:.2%})")
+    torch.save(landsat_tensor, os.path.join(batch_dir, f"data_x_{batch_idx}.pth"))
+    torch.save(sentinel_10m_tensor, os.path.join(batch_dir, f"data_y1_{batch_idx}.pth"))
+    torch.save(sentinel_20m_tensor, os.path.join(batch_dir, f"data_y2_{batch_idx}.pth"))
+    torch.save(landsat_angles_tensor, os.path.join(batch_dir, f"angles_x_{batch_idx}.pth"))
+    torch.save(sentinel_angles_tensor, os.path.join(batch_dir, f"angles_y_{batch_idx}.pth"))
     
-    # Create a log file with the dataset split information
-    split_info_path = os.path.join(output_dir, 'dataset_split_info.json')
-    with open(split_info_path, 'w') as f:
-        json.dump({
-            'train_pairs': [{'site': p['site'], 'date': p['date']} for p in train_pairs],
-            'val_pairs': [{'site': p['site'], 'date': p['date']} for p in val_pairs],
-            'test_pairs': [{'site': p['site'], 'date': p['date']} for p in test_pairs],
-            'total_samples': num_samples,
-            'train_samples': num_train,
-            'val_samples': num_val,
-            'test_samples': num_test,
-            'val_ratio': val_ratio,
-            'test_ratio': test_ratio
-        }, f, indent=2)
-    print(f"Dataset split information saved to {split_info_path}")
+    # Clear memory
+    del landsat_data, sentinel_10m_data, sentinel_20m_data, landsat_angles, sentinel_angles
+    del landsat_tensor, sentinel_10m_tensor, sentinel_20m_tensor, landsat_angles_tensor, sentinel_angles_tensor
+    gc.collect()
     
-    # Stats tracking
-    band_stats = {
-        'landsat': {band: {'min': float('inf'), 'max': float('-inf'), 'mean': [], 'std': []} for band in landsat_bands},
-        'sentinel': {band: {'min': float('inf'), 'max': float('-inf'), 'mean': [], 'std': []} for band in sentinel_bands}
+    print(f"{split_name} batch {batch_idx} .pth files created successfully")
+
+def process_data_split(data_paths, split_name):
+    """Process all data for a split in mini-batches to avoid memory issues."""
+    num_samples = len(data_paths)
+    
+    # Calculate number of batches
+    num_batches = (num_samples + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+    
+    print(f"Processing {split_name} data: {num_samples} samples in {num_batches} batches")
+    
+    # Process mini-batches
+    for i in range(num_batches):
+        start_idx = i * BATCH_SIZE
+        end_idx = min((i + 1) * BATCH_SIZE, num_samples)
+        
+        batch_paths = data_paths[start_idx:end_idx]
+        process_mini_batch(batch_paths, split_name, i)
+        
+        # Force garbage collection after each batch
+        gc.collect()
+    
+    # Save index file to record the total number of batches
+    index_info = {
+        "num_batches": num_batches,
+        "total_samples": num_samples,
+        "batch_size": BATCH_SIZE
     }
     
-    # Process each split
-    for split_name, split_pairs in [('train', train_pairs), ('valid', val_pairs), ('test', test_pairs)]:
-        print(f"\n{'-'*80}")
-        print(f"PROCESSING {split_name.upper()} SPLIT:")
-        print(f"{'-'*80}")
-        
-        # Force reprocessing even if files exist
-        if (os.path.exists(os.path.join(output_dir, f'{split_name}_x.pth')) and 
-            os.path.exists(os.path.join(output_dir, f'{split_name}_y.pth')) and
-            os.path.exists(os.path.join(output_dir, f'angles_{split_name}_x.json')) and
-            os.path.exists(os.path.join(output_dir, f'angles_{split_name}_y.json'))):
-            print(f"{split_name} files already exist, but will be reprocessed...")
-        
-        num_pairs = len(split_pairs)
-        
-        # Pre-allocate tensors for Landsat (x) and Sentinel (y) data
-        x_data = torch.zeros((num_pairs, 6, 128, 128), dtype=torch.float32)
-        y_data = torch.zeros((num_pairs, 6, 384, 384), dtype=torch.float32)
-        
-        # Create lists to store angle information
-        angles_x = []  # For Landsat
-        angles_y = []  # For Sentinel
-        
-        print(f"Processing {split_name} set with {num_pairs} pairs...")
-        
-        # Track resize operations
-        crop_count = {'landsat': 0, 'sentinel': 0}
-        pad_count = {'landsat': 0, 'sentinel': 0}
-        
-        for i, pair in enumerate(tqdm(split_pairs, desc=f"Loading {split_name} data")):
-            print(f"\nPair {i+1}/{num_pairs}: {pair['site']}/{pair['date']}")
-            
-            # Load Landsat bands in the correct order
-            for band_idx, band_name in enumerate(landsat_bands):
-                with rasterio.open(pair['landsat_files'][band_name]) as src:
-                    landsat_band = src.read(1)  # Read the first band
-                    orig_shape = landsat_band.shape
-                    
-                    # Calculate stats
-                    band_min = np.min(landsat_band)
-                    band_max = np.max(landsat_band)
-                    band_mean = np.mean(landsat_band)
-                    band_std = np.std(landsat_band)
-                    
-                    # Update global stats
-                    band_stats['landsat'][band_name]['min'] = min(band_stats['landsat'][band_name]['min'], band_min)
-                    band_stats['landsat'][band_name]['max'] = max(band_stats['landsat'][band_name]['max'], band_max)
-                    band_stats['landsat'][band_name]['mean'].append(band_mean)
-                    band_stats['landsat'][band_name]['std'].append(band_std)
-                    
-                    print(f"  Landsat {band_name} - Shape: {orig_shape}, Min: {band_min:.6f}, Max: {band_max:.6f}, Mean: {band_mean:.6f}, Std: {band_std:.6f}")
-                    
-                    
-                    # Convert to tensor and add to data array
-                    x_data[i, band_idx] = torch.from_numpy(landsat_band.astype(np.float32))
-            
-            # Load Sentinel bands in the correct order
-            for band_idx, band_name in enumerate(sentinel_bands):
-                with rasterio.open(pair['sentinel_files'][band_name]) as src:
-                    sentinel_band = src.read(1)  # Read the first band
-                    orig_shape = sentinel_band.shape
-                    
-                    # Calculate stats
-                    band_min = np.min(sentinel_band)
-                    band_max = np.max(sentinel_band)
-                    band_mean = np.mean(sentinel_band)
-                    band_std = np.std(sentinel_band)
-                    
-                    # Update global stats
-                    band_stats['sentinel'][band_name]['min'] = min(band_stats['sentinel'][band_name]['min'], band_min)
-                    band_stats['sentinel'][band_name]['max'] = max(band_stats['sentinel'][band_name]['max'], band_max)
-                    band_stats['sentinel'][band_name]['mean'].append(band_mean)
-                    band_stats['sentinel'][band_name]['std'].append(band_std)
-                    
-                    print(f"  Sentinel {band_name} - Shape: {orig_shape}, Min: {band_min:.6f}, Max: {band_max:.6f}, Mean: {band_mean:.6f}, Std: {band_std:.6f}")
-                    
-                    # Convert to tensor and add to data array
-                    y_data[i, band_idx] = torch.from_numpy(sentinel_band.astype(np.float32))
-            
-            # Add angle data
-            angles_x.append({
-                'site': pair['site'],
-                'date': pair['date'],
-                'landsat_date': pair['angles']['landsat']['date'],
-                'angles': copy.deepcopy(pair['angles']['landsat']['angles'])
-            })
-            
-            angles_y.append({
-                'site': pair['site'],
-                'date': pair['date'],
-                'sentinel_date': pair['angles']['sentinel']['date'],
-                'angles': copy.deepcopy(pair['angles']['sentinel']['angles'])
-            })
-            
-            print(f"  Added angle data for both sensors")
-        
-        # Print resize operations
-        print(f"\nResize operations for {split_name} set:")
-        print(f"  Landsat: {crop_count['landsat']} crops, {pad_count['landsat']} pads")
-        print(f"  Sentinel: {crop_count['sentinel']} crops, {pad_count['sentinel']} pads")
-        
-        # Print tensor stats
-        print(f"\nTensor statistics for {split_name} set:")
-        print(f"  x_data shape: {x_data.shape}, dtype: {x_data.dtype}")
-        print(f"  y_data shape: {y_data.shape}, dtype: {y_data.dtype}")
-        print(f"  x_data min: {x_data.min():.6f}, max: {x_data.max():.6f}, mean: {x_data.mean():.6f}, std: {x_data.std():.6f}")
-        print(f"  y_data min: {y_data.min():.6f}, max: {y_data.max():.6f}, mean: {y_data.mean():.6f}, std: {y_data.std():.6f}")
-        
-        # Save the tensors
-        x_path = os.path.join(output_dir, f'{split_name}_x.pth')
-        y_path = os.path.join(output_dir, f'{split_name}_y.pth')
-        torch.save(x_data, x_path)
-        torch.save(y_data, y_path)
-        print(f"Saved tensors to {x_path} and {y_path}")
-        
-        # Save angle files (matching the ordering of the tensors)
-        angles_x_path = os.path.join(output_dir, f'angles_{split_name}_x.json')
-        angles_y_path = os.path.join(output_dir, f'angles_{split_name}_y.json')
-        with open(angles_x_path, 'w') as f:
-            json.dump(angles_x, f, indent=2)
-            
-        with open(angles_y_path, 'w') as f:
-            json.dump(angles_y, f, indent=2)
-            
-        print(f"Saved angle files to {angles_x_path} and {angles_y_path}")
+    with open(os.path.join(OUTPUT_DIR, split_name, "index.json"), 'w') as f:
+        json.dump(index_info, f, indent=4)
     
-    # Calculate and print global band statistics
-    print(f"\n{'-'*80}")
-    print(f"GLOBAL BAND STATISTICS:")
-    print(f"{'-'*80}")
+    print(f"Completed processing {split_name} data")
+
+def merge_data_type_files(split_name, data_type, shape_info=None):
+    """
+    Merge all batch files for a specific data type (e.g. 'data_x', 'data_y1').
+    Process one data type at a time to reduce memory usage.
+    """
+    split_dir = os.path.join(OUTPUT_DIR, split_name)
     
-    # Landsat bands
-    print("\nLandsat bands:")
-    for band in landsat_bands:
-        stats = band_stats['landsat'][band]
-        mean_of_means = np.mean(stats['mean'])
-        mean_of_stds = np.mean(stats['std'])
-        print(f"  {band}:")
-        print(f"    Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
-        print(f"    Mean: {mean_of_means:.6f}, Std: {mean_of_stds:.6f}")
+    if not os.path.exists(split_dir):
+        print(f"Directory {split_dir} does not exist. Skipping {data_type} merge.")
+        return False
     
-    # Sentinel bands
-    print("\nSentinel bands:")
-    for band in sentinel_bands:
-        stats = band_stats['sentinel'][band]
-        mean_of_means = np.mean(stats['mean'])
-        mean_of_stds = np.mean(stats['std'])
-        print(f"  {band}:")
-        print(f"    Min: {stats['min']:.6f}, Max: {stats['max']:.6f}")
-        print(f"    Mean: {mean_of_means:.6f}, Std: {mean_of_stds:.6f}")
+    # Get all batch files for this data type
+    batch_files = sorted(glob.glob(os.path.join(split_dir, f"{data_type}_*.pth")))
     
-    # Save band statistics
-    stats_path = os.path.join(output_dir, 'band_statistics.json')
-    with open(stats_path, 'w') as f:
-        # Convert numpy values to native Python types for JSON serialization
-        for sensor in band_stats:
-            for band in band_stats[sensor]:
-                stats = band_stats[sensor][band]
-                stats['mean'] = float(np.mean(stats['mean']))
-                stats['std'] = float(np.mean(stats['std']))
-                stats['min'] = float(stats['min'])
-                stats['max'] = float(stats['max'])
+    if not batch_files:
+        print(f"No batch files found for {data_type} in {split_name}. Skipping.")
+        return False
+    
+    print(f"Merging {len(batch_files)} batch files for {data_type} in {split_name}...")
+    
+    # Initialize an empty tensor list
+    all_tensors = []
+    total_samples = 0
+    
+    # Load and append each batch
+    for i, batch_file in enumerate(batch_files):
+        try:
+            print(f"Loading {data_type} batch {i}/{len(batch_files)-1} for {split_name}...")
+            tensor = torch.load(batch_file)
+            total_samples += tensor.shape[0]
+            all_tensors.append(tensor)
+            
+            # If shape info is provided, verify the tensor shape (excluding batch dimension)
+            if shape_info and len(tensor.shape) > 1:
+                expected_shape = shape_info[1:]  # Skip the batch dimension
+                actual_shape = tensor.shape[1:]
+                if actual_shape != tuple(expected_shape):
+                    print(f"Warning: {os.path.basename(batch_file)} has unexpected shape {tensor.shape}, expected [..., {', '.join(map(str, expected_shape))}]")
+            
+            # Force garbage collection after loading each batch
+            gc.collect()
+        except Exception as e:
+            print(f"Error loading {batch_file}: {e}")
+            # Continue with other batches even if one fails
+            continue
+    
+    if not all_tensors:
+        print(f"No tensors loaded for {data_type} in {split_name}. Skipping merge.")
+        return False
+    
+    try:
+        # Concatenate and save
+        print(f"Concatenating {len(all_tensors)} tensors for {data_type} in {split_name}...")
+        merged_tensor = torch.cat(all_tensors, dim=0)
+        print(f"  Merged shape: {merged_tensor.shape}")
         
-        json.dump(band_stats, f, indent=2)
-    print(f"Saved band statistics to {stats_path}")
+        # Save merged file
+        output_file = os.path.join(OUTPUT_DIR, f"{data_type}_{split_name}.pth")
+        print(f"  Saving to {output_file}...")
+        torch.save(merged_tensor, output_file)
+        
+        # Verify file was created successfully
+        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+            print(f"  Successfully saved {output_file}")
+            
+            # Clear memory
+            del merged_tensor
+            del all_tensors
+            gc.collect()
+            
+            return True
+        else:
+            print(f"  Failed to save {output_file} properly")
+            return False
+    except Exception as e:
+        print(f"Error merging {data_type} in {split_name}: {e}")
+        
+        # If we get a specific error related to file size or memory, try saving in smaller chunks
+        if "file size" in str(e).lower() or "memory" in str(e).lower():
+            try:
+                print(f"Attempting alternative approach with torch.save...")
+                # Try using a different approach to save
+                output_file = os.path.join(OUTPUT_DIR, f"{data_type}_{split_name}.pth")
+                merged_tensor = torch.cat(all_tensors, dim=0)
+                
+                # Use lower-level save operation that might reduce memory usage
+                with open(output_file, 'wb') as f:
+                    torch.save(merged_tensor, f)
+                
+                # Verify file was created
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                    print(f"  Successfully saved {output_file} with alternative method")
+                    
+                    # Clear memory
+                    del merged_tensor
+                    del all_tensors
+                    gc.collect()
+                    
+                    return True
+            except Exception as inner_e:
+                print(f"  Alternative saving method also failed: {inner_e}")
+        
+        # Clear memory before returning
+        gc.collect()
+        return False
+
+def merge_batches(split_name):
+    """
+    Merge all batch files for a split into a single file.
+    Process one data type at a time to reduce memory usage.
+    """
+    split_dir = os.path.join(OUTPUT_DIR, split_name)
     
-    # Print elapsed time
-    elapsed_time = time.time() - start_time
-    hours, remainder = divmod(elapsed_time, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    print(f"\n{'-'*80}")
-    print(f"DATASET PREPARATION COMPLETE!")
-    print(f"{'-'*80}")
-    print(f"Elapsed time: {int(hours):02d}:{int(minutes):02d}:{seconds:.2f}")
-    print(f"Files saved to: {output_dir}")
+    if not os.path.exists(split_dir):
+        print(f"Directory {split_dir} does not exist. Skipping {split_name} merge.")
+        return False
+    
+    # Load index file to determine expected shapes
+    expected_shapes = {}
+    try:
+        with open(os.path.join(split_dir, "index.json"), 'r') as f:
+            index_info = json.load(f)
+            num_samples = index_info["total_samples"]
+            
+            # Set expected shapes based on known dimensions
+            expected_shapes["data_x"] = [num_samples, 6, 128, 128]
+            expected_shapes["data_y1"] = [num_samples, 4, 384, 384]
+            expected_shapes["data_y2"] = [num_samples, 2, 192, 192]
+            expected_shapes["angles_x"] = [num_samples, 4]
+            expected_shapes["angles_y"] = [num_samples, 4]
+    except Exception:
+        # If index file doesn't exist or has issues, proceed without expected shapes
+        expected_shapes = None
+    
+    # Process each data type separately to reduce memory usage
+    data_types = ["data_x", "data_y1", "data_y2", "angles_x", "angles_y"]
+    success = True
+    
+    for data_type in data_types:
+        shape_info = expected_shapes.get(data_type) if expected_shapes else None
+        type_success = merge_data_type_files(split_name, data_type, shape_info)
+        
+        # If any data type fails, mark the overall merge as failed
+        if not type_success:
+            success = False
+        
+        # Force garbage collection after each data type
+        gc.collect()
+    
+    return success
+
+def cleanup_batch_files(split_name):
+    """Delete all batch files after merging."""
+    split_dir = os.path.join(OUTPUT_DIR, split_name)
+    
+    if not os.path.exists(split_dir):
+        print(f"Directory {split_name} does not exist. Skipping cleanup.")
+        return
+    
+    print(f"Checking merged files for {split_name} before cleaning up...")
+    
+    # First check if the merged files exist and have valid sizes
+    merged_files = {
+        "data_x": os.path.join(OUTPUT_DIR, f"data_x_{split_name}.pth"),
+        "data_y1": os.path.join(OUTPUT_DIR, f"data_y1_{split_name}.pth"),
+        "data_y2": os.path.join(OUTPUT_DIR, f"data_y2_{split_name}.pth"),
+        "angles_x": os.path.join(OUTPUT_DIR, f"angles_x_{split_name}.pth"),
+        "angles_y": os.path.join(OUTPUT_DIR, f"angles_y_{split_name}.pth")
+    }
+    
+    all_files_valid = True
+    
+    # Check each merged file
+    for data_type, file_path in merged_files.items():
+        if not os.path.exists(file_path):
+            print(f"  Missing merged file: {os.path.basename(file_path)}")
+            all_files_valid = False
+            continue
+        
+        # Check file size (should be non-zero)
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        if file_size < 0.01:  # Very small files might be empty/corrupted
+            print(f"  Suspiciously small merged file: {os.path.basename(file_path)} ({file_size:.2f} MB)")
+            all_files_valid = False
+            continue
+        
+        # Try to load the file to verify it's valid
+        try:
+            # Just load the metadata without loading the full tensor into memory
+            torch_file = torch.load(file_path, map_location=torch.device('cpu'))
+            if not isinstance(torch_file, torch.Tensor):
+                print(f"  File {os.path.basename(file_path)} doesn't contain a tensor")
+                all_files_valid = False
+            elif torch_file.numel() == 0:
+                print(f"  File {os.path.basename(file_path)} contains an empty tensor")
+                all_files_valid = False
+            else:
+                print(f"  Valid merged file: {os.path.basename(file_path)} ({file_size:.2f} MB)")
+            
+            # Clear memory
+            del torch_file
+            gc.collect()
+        except Exception as e:
+            print(f"  Error validating {os.path.basename(file_path)}: {e}")
+            all_files_valid = False
+    
+    # Only delete if all merged files are valid
+    if all_files_valid:
+        print(f"All merged files for {split_name} are valid. Cleaning up batch files...")
+        
+        # Remove all batch files
+        batch_files = glob.glob(os.path.join(split_dir, "*.pth"))
+        for file in batch_files:
+            try:
+                os.remove(file)
+                print(f"  Deleted {os.path.basename(file)}")
+            except Exception as e:
+                print(f"  Error deleting {file}: {e}")
+        
+        # Remove index.json
+        try:
+            index_file = os.path.join(split_dir, "index.json")
+            if os.path.exists(index_file):
+                os.remove(index_file)
+                print(f"  Deleted {os.path.basename(index_file)}")
+        except Exception as e:
+            print(f"  Error deleting index file: {e}")
+        
+        # Remove the directory
+        try:
+            os.rmdir(split_dir)
+            print(f"  Removed directory {split_dir}")
+        except Exception as e:
+            print(f"  Error removing directory {split_dir}: {e}")
+    else:
+        print(f"Not all merged files for {split_name} are valid. Keeping batch files for safety.")
+
+def create_pth_files():
+    """
+    Create the .pth files for training, validation, and testing.
+    Using mini-batches to avoid memory issues. Then merge all batches
+    and clean up batch files.
+    """
+    # Set random seed for reproducibility
+    random.seed(42)
+    
+    # Create output directory
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Collect all paths to data
+    print("Collecting data paths...")
+    data_paths = collect_data_paths()
+    total_samples = len(data_paths)
+    print(f"Found {total_samples} complete data points")
+    
+    # Shuffle data paths to ensure random distribution
+    random.shuffle(data_paths)
+    
+    # Calculate split indices
+    train_size = int(total_samples * TRAIN_RATIO)
+    valid_size = int(total_samples * VALID_RATIO)
+    
+    # Create splits
+    train_paths = data_paths[:train_size]
+    valid_paths = data_paths[train_size:train_size + valid_size]
+    test_paths = data_paths[train_size + valid_size:]
+    
+    print(f"Split sizes: Train={len(train_paths)}, Valid={len(valid_paths)}, Test={len(test_paths)}")
+    
+    # Create directories for each split
+    os.makedirs(os.path.join(OUTPUT_DIR, "train"), exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "valid"), exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_DIR, "test"), exist_ok=True)
+    
+    # Create a metadata file with split info
+    split_info = {
+        "train_samples": len(train_paths),
+        "valid_samples": len(valid_paths),
+        "test_samples": len(test_paths),
+        "total_samples": total_samples,
+        "train_ratio": TRAIN_RATIO,
+        "valid_ratio": VALID_RATIO,
+        "test_ratio": TEST_RATIO
+    }
+    
+    with open(os.path.join(OUTPUT_DIR, "splits.json"), 'w') as f:
+        json.dump(split_info, f, indent=4)
+    
+    # Process and save each split separately in mini-batches
+    print("\n=== PROCESSING TRAINING DATA ===")
+    process_data_split(train_paths, "train")
+    
+    print("\n=== PROCESSING VALIDATION DATA ===")
+    process_data_split(valid_paths, "valid")
+    
+    print("\n=== PROCESSING TEST DATA ===")
+    process_data_split(test_paths, "test")
+    
+    print("\n=== MERGING BATCHES ===")
+    # Merge batches and clean up
+    for split in ["train", "valid", "test"]:
+        print(f"\nProcessing {split} split...")
+        merge_success = merge_batches(split)
+        
+        # Only cleanup if merge was successful
+        if merge_success:
+            print(f"Merge for {split} was successful. Cleaning up batch files.")
+            cleanup_batch_files(split)
+        else:
+            print(f"Merge for {split} had issues. Keeping batch files.")
+    
+    print("\nAll data processing completed.")
+    print(f"Files saved to: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
-    base_dir = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data'
-    output_dir = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data_pth'
-    prepare_satellite_dataset(base_dir, output_dir)
+    create_pth_files()

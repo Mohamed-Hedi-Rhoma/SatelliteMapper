@@ -1,205 +1,210 @@
 import os
+import glob
+import json
+import shutil
 import numpy as np
 import rasterio
-from rasterio.plot import show
-import shutil
+from rasterio.transform import Affine
+import re
 from tqdm import tqdm
+import concurrent.futures
 
-def preprocess_satellite_data(base_dir):
+# Define directories
+DATA_DIR = "C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data"
+OUTPUT_DIR = "C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data_prepared"
+
+# Define scaling factors and offsets
+LANDSAT_SCALE_FACTOR = 0.0000275
+LANDSAT_OFFSET = -0.2
+SENTINEL_SCALE_FACTOR = 0.0001
+SENTINEL_OFFSET = 0  # No offset for Sentinel-2
+
+# Define the bands to process
+LANDSAT_BANDS = ['blue.tif', 'green.tif', 'red.tif', 'nir.tif', 'swir1.tif', 'swir2.tif']
+SENTINEL_BANDS = ['blue.tif', 'green.tif', 'red.tif', 'nir.tif', 'swir1.tif', 'swir2.tif']
+
+def preprocess_landsat_image(input_path, output_path):
     """
-    Preprocess Landsat 8 and Sentinel-2 data applying appropriate scaling factors.
-    Handles individual band files.
-    
-    Landsat 8: Scale factor 0.0000275, Offset -0.2
-    Sentinel-2: Scale factor 0.0001, No offset
-    
-    Also copies metadata.json and angles.json to the scaled directory.
+    Preprocess a Landsat 8.
+    Apply scale factor and offset: (Raw value * scale_factor) + offset
     
     Args:
-        base_dir (str): Base directory containing the satellite data
+        input_path (str): Path to input image file
+        output_path (str): Path to output image file
     """
-    # Stats counters
-    landsat_processed = 0
-    sentinel_processed = 0
-    total_sites = 0
-    total_dates = 0
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
-    print(f"Starting preprocessing of satellite data from {base_dir}")
-    
-    # Get all site folders
-    site_folders = [f for f in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, f)) and f != 'dataset_info.txt']
-    total_sites = len(site_folders)
-    print(f"Found {total_sites} site folders to process")
-    
-    for site in tqdm(site_folders, desc="Processing sites"):
-        site_path = os.path.join(base_dir, site)
-        print(f"\n{'='*50}")
-        print(f"Processing site: {site}")
+    # Read input image
+    with rasterio.open(input_path) as src:
+        # Read data
+        data = src.read(1).astype(np.float32)
         
-        # Get all date folders for the site
-        date_folders = [d for d in os.listdir(site_path) if os.path.isdir(os.path.join(site_path, d))]
-        site_dates = len([d for d in date_folders if not d.endswith('_scaled')])
-        total_dates += site_dates
-        print(f"Found {site_dates} date folders to process for site {site}")
+        # Apply scale factor and offset: (raw * scale_factor) + offset
+        data = (data * LANDSAT_SCALE_FACTOR) + LANDSAT_OFFSET
         
-        for date in tqdm(date_folders, desc=f"Dates in {site}", leave=False):
-            # Skip if it's already a scaled directory
-            if date.endswith('_scaled'):
-                continue
-                
-            original_date_path = os.path.join(site_path, date)
-            scaled_date_path = os.path.join(site_path, f"{date}_scaled")
-            
-            print(f"\n{'-'*50}")
-            print(f"Processing date: {date} for site {site}")
-            
-            # Create scaled directory
-            os.makedirs(scaled_date_path, exist_ok=True)
-            
-            # Create landsat and sentinel subdirectories in the scaled directory
-            scaled_landsat_dir = os.path.join(scaled_date_path, 'landsat8')
-            scaled_sentinel_dir = os.path.join(scaled_date_path, 'sentinel2')
-            os.makedirs(scaled_landsat_dir, exist_ok=True)
-            os.makedirs(scaled_sentinel_dir, exist_ok=True)
-            
-            # Process Landsat 8 data
-            landsat_dir = os.path.join(original_date_path, 'landsat8')
-            if os.path.exists(landsat_dir):
-                landsat_files = [f for f in os.listdir(landsat_dir) if f.endswith('.tif')]
-                print(f"Found {len(landsat_files)} Landsat 8 files to process")
-                
-                for landsat_file in landsat_files:
-                    src_file = os.path.join(landsat_dir, landsat_file)
-                    dst_file = os.path.join(scaled_landsat_dir, landsat_file)
-                    
-                    # Process all files, even if they already exist
-                    if os.path.exists(dst_file):
-                        print(f"  Reprocessing {landsat_file} (overwriting existing file)")
-                        # Continue with processing instead of skipping
-                    
-                    print(f"  Processing Landsat file: {landsat_file}")
-                    
-                    # Read, scale, and save the Landsat data
-                    with rasterio.open(src_file) as src:
-                        # Read the data
-                        landsat_data = src.read()
-                        
-                        # Calculate and print stats before scaling
-                        min_val = np.min(landsat_data)
-                        max_val = np.max(landsat_data)
-                        mean_val = np.mean(landsat_data)
-                        std_val = np.std(landsat_data)
-                        
-                        print(f"    BEFORE SCALING - {landsat_file}:")
-                        print(f"    Min: {min_val:.6f}, Max: {max_val:.6f}")
-                        print(f"    Mean: {mean_val:.6f}, Std: {std_val:.6f}")
-                        
-                        # Apply scaling: scale factor 0.0000275, offset -0.2
-                        landsat_scaled = landsat_data * 0.0000275 - 0.2
-                        
-                        # Calculate and print stats after scaling
-                        min_scaled = np.min(landsat_scaled)
-                        max_scaled = np.max(landsat_scaled)
-                        mean_scaled = np.mean(landsat_scaled)
-                        std_scaled = np.std(landsat_scaled)
-                        
-                        print(f"    AFTER SCALING - {landsat_file}:")
-                        print(f"    Min: {min_scaled:.6f}, Max: {max_scaled:.6f}")
-                        print(f"    Mean: {mean_scaled:.6f}, Std: {std_scaled:.6f}")
-                        
-                        # Create a new GeoTIFF with the same metadata
-                        meta = src.meta.copy()
-                        
-                        with rasterio.open(dst_file, 'w', **meta) as dst:
-                            dst.write(landsat_scaled)
-                            
-                        landsat_processed += 1
-                        print(f"    Saved scaled Landsat file to {dst_file}")
-            else:
-                print(f"No Landsat 8 directory found for {site}/{date}")
-            
-            # Process Sentinel-2 data
-            sentinel_dir = os.path.join(original_date_path, 'sentinel2')
-            if os.path.exists(sentinel_dir):
-                sentinel_files = [f for f in os.listdir(sentinel_dir) if f.endswith('.tif')]
-                print(f"Found {len(sentinel_files)} Sentinel-2 files to process")
-                
-                for sentinel_file in sentinel_files:
-                    src_file = os.path.join(sentinel_dir, sentinel_file)
-                    dst_file = os.path.join(scaled_sentinel_dir, sentinel_file)
-                    
-                    # Process all files, even if they already exist
-                    if os.path.exists(dst_file):
-                        print(f"  Reprocessing {sentinel_file} (overwriting existing file)")
-                        # Continue with processing instead of skipping
-                    
-                    print(f"  Processing Sentinel file: {sentinel_file}")
-                    
-                    # Read, scale, and save the Sentinel data
-                    with rasterio.open(src_file) as src:
-                        # Read the data
-                        sentinel_data = src.read()
-                        
-                        # Calculate and print stats before scaling
-                        min_val = np.min(sentinel_data)
-                        max_val = np.max(sentinel_data)
-                        mean_val = np.mean(sentinel_data)
-                        std_val = np.std(sentinel_data)
-                        
-                        print(f"    BEFORE SCALING - {sentinel_file}:")
-                        print(f"    Min: {min_val:.6f}, Max: {max_val:.6f}")
-                        print(f"    Mean: {mean_val:.6f}, Std: {std_val:.6f}")
-                        
-                        # Apply scaling: scale factor 0.0001, no offset
-                        sentinel_scaled = sentinel_data * 0.0001
-                        
-                        # Calculate and print stats after scaling
-                        min_scaled = np.min(sentinel_scaled)
-                        max_scaled = np.max(sentinel_scaled)
-                        mean_scaled = np.mean(sentinel_scaled)
-                        std_scaled = np.std(sentinel_scaled)
-                        
-                        print(f"    AFTER SCALING - {sentinel_file}:")
-                        print(f"    Min: {min_scaled:.6f}, Max: {max_scaled:.6f}")
-                        print(f"    Mean: {mean_scaled:.6f}, Std: {std_scaled:.6f}")
-                        
-                        # Create a new GeoTIFF with the same metadata
-                        meta = src.meta.copy()
-                        
-                        with rasterio.open(dst_file, 'w', **meta) as dst:
-                            dst.write(sentinel_scaled)
-                            
-                        sentinel_processed += 1
-                        print(f"    Saved scaled Sentinel file to {dst_file}")
-            else:
-                print(f"No Sentinel-2 directory found for {site}/{date}")
-            
-            # Copy metadata.json to the scaled directory
-            src_metadata = os.path.join(original_date_path, 'metadata.json')
-            dst_metadata = os.path.join(scaled_date_path, 'metadata.json')
-            if os.path.exists(src_metadata):
-                shutil.copy2(src_metadata, dst_metadata)
-                print(f"Copied metadata.json for {site}/{date}")
-            
-            # Copy angles.json to the scaled directory
-            src_angles = os.path.join(original_date_path, 'angles.json')
-            dst_angles = os.path.join(scaled_date_path, 'angles.json')
-            if os.path.exists(src_angles):
-                shutil.copy2(src_angles, dst_angles)
-                print(f"Copied angles.json for {site}/{date}")
+        # Clip data to valid reflectance range [0, 1]
+        data = np.clip(data, 0, 1)
+        
+        # Create output image with same metadata
+        profile = src.profile.copy()
+        profile.update({
+            'dtype': 'float32',
+            'driver': 'GTiff',
+            'compress': 'lzw',
+        })
+        
+        # Write output
+        with rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(data, 1)
 
-    # Print final stats summary
-    print("\n" + "="*60)
-    print("PREPROCESSING SUMMARY:")
-    print("="*60)
-    print(f"Total sites processed: {total_sites}")
-    print(f"Total date folders processed: {total_dates}")
-    print(f"Total Landsat 8 files processed: {landsat_processed}")
-    print(f"Total Sentinel-2 files processed: {sentinel_processed}")
-    print(f"Total files processed: {landsat_processed + sentinel_processed}")
-    print("="*60)
+def preprocess_sentinel_image(input_path, output_path):
+    """
+    Preprocess a Sentinel-2 image.
+    Apply scale factor: Raw value * scale_factor (no offset)
+    
+    Args:
+        input_path (str): Path to input image file
+        output_path (str): Path to output image file
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Read input image
+    with rasterio.open(input_path) as src:
+        # Read data
+        data = src.read(1).astype(np.float32)
+        
+        # Apply scale factor: raw * scale_factor (no offset for Sentinel-2)
+        data = data * SENTINEL_SCALE_FACTOR
+        
+        # Clip data to valid reflectance range [0, 1]
+        data = np.clip(data, 0, 1)
+        
+        # Create output image with same metadata
+        profile = src.profile.copy()
+        profile.update({
+            'dtype': 'float32',
+            'driver': 'GTiff',
+            'compress': 'lzw',
+        })
+        
+        # Write output
+        with rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(data, 1)
+
+def process_image_pair(site_path):
+    """
+    Process all image pairs in a site directory.
+    
+    Args:
+        site_path (str): Path to site directory
+    """
+    site_name = os.path.basename(site_path)
+    print(f"Processing site: {site_name}")
+    
+    # Get all acquisition date directories
+    acquisition_dirs = [d for d in glob.glob(os.path.join(site_path, "*")) 
+                        if os.path.isdir(d) and not d.endswith("__pycache__")]
+    
+    for acq_dir in acquisition_dirs:
+        acq_date = os.path.basename(acq_dir)
+        print(f"  Processing acquisition date: {acq_date}")
+        
+        # Define paths
+        sentinel_dir = os.path.join(acq_dir, "sentinel2")
+        landsat_dir = os.path.join(acq_dir, "landsat8")
+        
+        # Define output directories
+        output_site_dir = os.path.join(OUTPUT_DIR, site_name)
+        output_acq_dir = os.path.join(output_site_dir, acq_date)
+        output_sentinel_dir = os.path.join(output_acq_dir, "sentinel2")
+        output_landsat_dir = os.path.join(output_acq_dir, "landsat8")
+        
+        # Create output directories
+        os.makedirs(output_sentinel_dir, exist_ok=True)
+        os.makedirs(output_landsat_dir, exist_ok=True)
+        
+        # Process Sentinel-2 images
+        if os.path.exists(sentinel_dir):
+            # Copy angles.json if it exists
+            angles_json = os.path.join(sentinel_dir, "angles.json")
+            if os.path.exists(angles_json):
+                shutil.copy2(angles_json, os.path.join(output_sentinel_dir, "angles.json"))
+            
+            # Process each Sentinel-2 band
+            for band in SENTINEL_BANDS:
+                input_path = os.path.join(sentinel_dir, band)
+                if os.path.exists(input_path):
+                    output_path = os.path.join(output_sentinel_dir, band)
+                    preprocess_sentinel_image(input_path, output_path)
+                    print(f"    Processed Sentinel-2 {band}")
+                else:
+                    print(f"    Warning: Sentinel-2 {band} not found")
+        else:
+            print(f"  Warning: Sentinel-2 directory not found for {acq_date}")
+        
+        # Process Landsat 8 images
+        if os.path.exists(landsat_dir):
+            # Copy angles.json if it exists
+            angles_json = os.path.join(landsat_dir, "angles.json")
+            if os.path.exists(angles_json):
+                shutil.copy2(angles_json, os.path.join(output_landsat_dir, "angles.json"))
+            
+            # Process each Landsat 8 band
+            for band in LANDSAT_BANDS:
+                input_path = os.path.join(landsat_dir, band)
+                if os.path.exists(input_path):
+                    output_path = os.path.join(output_landsat_dir, band)
+                    preprocess_landsat_image(input_path, output_path)
+                    print(f"    Processed Landsat 8 {band}")
+                else:
+                    print(f"    Warning: Landsat 8 {band} not found")
+        else:
+            print(f"  Warning: Landsat 8 directory not found for {acq_date}")
+
+def process_all_sites_parallel():
+    """
+    Process all sites in parallel.
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Get all site directories
+    site_dirs = [d for d in glob.glob(os.path.join(DATA_DIR, "*")) 
+                if os.path.isdir(d) and not d.endswith("__pycache__")]
+    
+    print(f"Found {len(site_dirs)} sites to process")
+    
+    # Process each site in parallel
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        executor.map(process_image_pair, site_dirs)
+    
+    print("All sites processed successfully")
+
+def process_all_sites_sequential():
+    """
+    Process all sites sequentially (useful for debugging).
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Get all site directories
+    site_dirs = [d for d in glob.glob(os.path.join(DATA_DIR, "*")) 
+                if os.path.isdir(d) and not d.endswith("__pycache__")]
+    
+    print(f"Found {len(site_dirs)} sites to process")
+    
+    # Process each site
+    for site_dir in site_dirs:
+        process_image_pair(site_dir)
+    
+    print("All sites processed successfully")
 
 if __name__ == "__main__":
-    base_dir = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data'
-    preprocess_satellite_data(base_dir)
-    print("Preprocessing complete. Scaled data is stored in [date]_scaled directories.")
+    # Uncomment one of these based on your preference
+    # Process all sites in parallel (faster but harder to debug)
+    process_all_sites_parallel()
+    
+    # Or process all sites sequentially (slower but easier to debug)
+    # process_all_sites_sequential()

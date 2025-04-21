@@ -1,14 +1,12 @@
 import os
 import torch
-import json
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
 
 class SatelliteDataset(Dataset):
     """
     Dataset for satellite imagery with angle information.
     
-    Loads Landsat 8 (x) and Sentinel-2 (y) data along with their angle information.
+    Loads Landsat 8 (x) and Sentinel-2 (y1, y2) data along with their angle information.
     """
     def __init__(self, tensor_dir, dataset_type='train', transform=None):
         """
@@ -24,59 +22,29 @@ class SatelliteDataset(Dataset):
         self.transform = transform
         
         # Load tensor data
-        self.x_data = torch.load(os.path.join(tensor_dir, f'{dataset_type}_x.pth'))
-        self.y_data = torch.load(os.path.join(tensor_dir, f'{dataset_type}_y.pth'))
+        self.landsat_data = torch.load(os.path.join(tensor_dir, f'data_x_{dataset_type}.pth'))
+        self.sentinel_10m_data = torch.load(os.path.join(tensor_dir, f'data_y1_{dataset_type}.pth'))
+        self.sentinel_20m_data = torch.load(os.path.join(tensor_dir, f'data_y2_{dataset_type}.pth'))
         
         # Load angle data
-        with open(os.path.join(tensor_dir, f'angles_{dataset_type}_x.json'), 'r') as f:
-            self.x_angles = json.load(f)
-        
-        with open(os.path.join(tensor_dir, f'angles_{dataset_type}_y.json'), 'r') as f:
-            self.y_angles = json.load(f)
+        self.landsat_angles = torch.load(os.path.join(tensor_dir, f'angles_x_{dataset_type}.pth'))
+        self.sentinel_angles = torch.load(os.path.join(tensor_dir, f'angles_y_{dataset_type}.pth'))
         
         # Validate data shapes
-        assert len(self.x_data) == len(self.y_data), "X and Y data must have the same number of samples"
-        assert len(self.x_data) == len(self.x_angles), "X data and X angles must have the same number of samples"
-        assert len(self.y_data) == len(self.y_angles), "Y data and Y angles must have the same number of samples"
+        assert len(self.landsat_data) == len(self.sentinel_10m_data), "Landsat and Sentinel 10m data must have the same number of samples"
+        assert len(self.landsat_data) == len(self.sentinel_20m_data), "Landsat and Sentinel 20m data must have the same number of samples"
+        assert len(self.landsat_data) == len(self.landsat_angles), "Landsat data and angles must have the same number of samples"
+        assert len(self.landsat_data) == len(self.sentinel_angles), "Landsat data and Sentinel angles must have the same number of samples"
         
-        # Convert angle dictionaries to tensors for easier batch processing
-        self.x_angle_tensors = self._prepare_angle_tensors(self.x_angles)
-        self.y_angle_tensors = self._prepare_angle_tensors(self.y_angles)
-        
-        print(f"Loaded {dataset_type} dataset with {len(self.x_data)} samples")
-        print(f"X shape: {self.x_data.shape}, Y shape: {self.y_data.shape}")
-    
-    def _prepare_angle_tensors(self, angle_data):
-        """
-        Prepare angle data as tensors.
-        
-        Args:
-            angle_data (list): List of dictionaries containing angle information
-            
-        Returns:
-            torch.Tensor: Tensor of angle values with shape [n_samples, 4]
-        """
-        angle_tensors = torch.zeros((len(angle_data), 4), dtype=torch.float32)
-        
-        for i, sample in enumerate(angle_data):
-            angles = sample['angles']
-            # Order: solar_azimuth, solar_zenith, view_azimuth, view_zenith
-            angle_values = [
-                angles.get('solar_azimuth', 0),
-                angles.get('solar_zenith', 0),
-                angles.get('view_azimuth', 0),
-                angles.get('view_zenith', 0)
-            ]
-            
-            # Replace None with 0
-            angle_values = [0 if v is None else v for v in angle_values]
-            
-            angle_tensors[i] = torch.tensor(angle_values, dtype=torch.float32)
-        
-        return angle_tensors
+        print(f"Loaded {dataset_type} dataset with {len(self.landsat_data)} samples")
+        print(f"Landsat data shape: {self.landsat_data.shape}")
+        print(f"Sentinel 10m data shape: {self.sentinel_10m_data.shape}")
+        print(f"Sentinel 20m data shape: {self.sentinel_20m_data.shape}")
+        print(f"Landsat angles shape: {self.landsat_angles.shape}")
+        print(f"Sentinel angles shape: {self.sentinel_angles.shape}")
     
     def __len__(self):
-        return len(self.x_data)
+        return len(self.landsat_data)
     
     def __getitem__(self, idx):
         """
@@ -84,36 +52,32 @@ class SatelliteDataset(Dataset):
         
         Returns a dictionary containing:
         - 'landsat_img': Landsat 8 image tensor (6, 128, 128)
-        - 'sentinel_img': Sentinel-2 image tensor (6, 384, 384)
+        - 'sentinel_10m_img': Sentinel-2 10m bands image tensor (4, 384, 384)
+        - 'sentinel_20m_img': Sentinel-2 20m bands image tensor (2, 192, 192)
         - 'landsat_angles': Landsat 8 angle tensor (4,)
         - 'sentinel_angles': Sentinel-2 angle tensor (4,)
-        - 'landsat_site': Site name for Landsat image
-        - 'sentinel_site': Site name for Sentinel image
         """
         # Get images
-        landsat_img = self.x_data[idx]
-        sentinel_img = self.y_data[idx]
+        landsat_img = self.landsat_data[idx]
+        sentinel_10m_img = self.sentinel_10m_data[idx]
+        sentinel_20m_img = self.sentinel_20m_data[idx]
         
         # Get angles
-        landsat_angles = self.x_angle_tensors[idx]
-        sentinel_angles = self.y_angle_tensors[idx]
-        
-        # Get site names for reference
-        landsat_site = self.x_angles[idx]['site']
-        sentinel_site = self.y_angles[idx]['site']
+        landsat_angles = self.landsat_angles[idx]
+        sentinel_angles = self.sentinel_angles[idx]
         
         # Apply transformations if specified
         if self.transform:
             landsat_img = self.transform(landsat_img)
-            sentinel_img = self.transform(sentinel_img)
+            sentinel_10m_img = self.transform(sentinel_10m_img)
+            sentinel_20m_img = self.transform(sentinel_20m_img)
         
         return {
             'landsat_img': landsat_img,
-            'sentinel_img': sentinel_img,
+            'sentinel_10m_img': sentinel_10m_img,
+            'sentinel_20m_img': sentinel_20m_img,
             'landsat_angles': landsat_angles,
-            'sentinel_angles': sentinel_angles,
-            'landsat_site': landsat_site,
-            'sentinel_site': sentinel_site
+            'sentinel_angles': sentinel_angles
         }
 
 def create_train_dataloader(tensor_dir, batch_size=8, num_workers=4, shuffle=True):
@@ -212,7 +176,7 @@ def create_test_dataloader(tensor_dir, batch_size=1, num_workers=4):
 
 # Example usage
 if __name__ == "__main__":
-    tensor_dir = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/data_pth'
+    tensor_dir = 'C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/pth_data'
     
     # Create dataloaders
     train_loader = create_train_dataloader(tensor_dir)
@@ -220,7 +184,7 @@ if __name__ == "__main__":
     test_loader = create_test_dataloader(tensor_dir)
     
     # Print dataloader info
-    print(f"Train loader: {len(train_loader)} batches")
+    print(f"\nTrain loader: {len(train_loader)} batches")
     print(f"Valid loader: {len(valid_loader)} batches")
     print(f"Test loader: {len(test_loader)} batches")
     

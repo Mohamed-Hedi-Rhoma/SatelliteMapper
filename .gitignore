@@ -3,4 +3,8 @@
 .pixi
 *.egg-info
 data
-data_pth
+pth_data
+landsat_data
+data_sentinel2
+data_prepared
+
