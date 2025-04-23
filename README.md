@@ -66,6 +66,7 @@ curl -fsSL https://pixi.sh/install.sh | bash
 
 # Install project dependencies
 pixi install
+```
 
 
 ## Data Preparation
