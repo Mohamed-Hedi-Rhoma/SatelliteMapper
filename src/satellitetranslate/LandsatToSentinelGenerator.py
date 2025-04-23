@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from Satellitetranslate.src.satellitetranslate.ConditionalInstanceNorm2d import ConditionalInstanceNorm2d
-from Satellitetranslate.src.satellitetranslate.ResidualBlock import ResidualBlock
-from Satellitetranslate.src.satellitetranslate.AttentionBlock import AttentionBlock
-from Satellitetranslate.src.satellitetranslate.SpectralResponseLayer import SpectralResponseLayer
-from Satellitetranslate.src.satellitetranslate.UpsamplingBlock import UpsamplingBlock, MultiscaleUpsamplingBlock
+from satellitetranslate.ConditionalInstanceNorm2d import ConditionalInstanceNorm2d
+from satellitetranslate.ResidualBlock import ResidualBlock
+from satellitetranslate.AttentionBlock import AttentionBlock
+from satellitetranslate.SpectralResponseLayer import SpectralResponseLayer
+from satellitetranslate.UpsamplingBlock import UpsamplingBlock, MultiscaleUpsamplingBlock
 
 
 class LandsatToSentinelGenerator(nn.Module):
@@ -272,7 +272,7 @@ class LandsatToSentinelGenerator(nn.Module):
 
 # Example usage:
 if __name__ == "__main__":
-    from Satellitetranslate.src.satellitetranslate.generatorconfig import GeneratorConfig
+    from satellitetranslate.generatorconfig import GeneratorConfig
     
     # Create a configuration
     config = GeneratorConfig(

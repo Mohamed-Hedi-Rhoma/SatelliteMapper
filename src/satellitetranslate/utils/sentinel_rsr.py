@@ -86,7 +86,7 @@ class RSRReader:
 
 # Example usage
 if __name__ == "__main__":
-    rsr_reader = RSRReader("C:/Users/msi/Desktop/SatelliteTranslate/Satellitetranslate/pth_data/sentinel2.rsr")
+    rsr_reader = RSRReader("/home/mrhouma/Documents/Project_perso/SatelliteMapper/data/sentinel2.rsr")
     full_matrix, vnir_matrix, swir_matrix, wavelengths, vnir_wavelengths, swir_wavelengths = rsr_reader.read_rsr_file()
     
     # Print the shapes of the resulting matrices
@@ -96,7 +96,8 @@ if __name__ == "__main__":
     print(f"VNIR matrix shape: {vnir_matrix.shape}")
     print(f"SWIR wavelengths shape: {swir_wavelengths.shape}")
     print(f"SWIR matrix shape: {swir_matrix.shape}")
-    
+    print(vnir_matrix)
+    print(swir_matrix)    
     # Print the wavelength ranges using "um" instead of the Greek mu symbol
     print(f"\nFull wavelength range: {wavelengths[0]} - {wavelengths[-1]} um")
     print(f"VNIR wavelength range: {vnir_wavelengths[0]} - {vnir_wavelengths[-1]} um")

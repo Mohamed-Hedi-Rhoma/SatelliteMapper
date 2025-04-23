@@ -4,7 +4,7 @@ from typing import List, Tuple, Optional, Union
 
 @dataclass
 class GeneratorConfig:
-    """Configuration for the Landsat to Sentinel-2 Generator with multi-resolution outputs."""
+    """Configuration for the Satellite Image Translation Generators."""
     # Input/Output specifications
     landsat_channels: int = 6              # Number of input Landsat-8 bands
     sentinel_vnir_channels: int = 4        # Number of visible/NIR Sentinel-2 bands (blue, green, red, NIR)
@@ -14,6 +14,7 @@ class GeneratorConfig:
     # Hyperspectral representation
     vnir_hyperspectral_dim: int = 0        # Dimension of VNIR hyperspectral representation (auto-set from RSR)
     swir_hyperspectral_dim: int = 0        # Dimension of SWIR hyperspectral representation (auto-set from RSR)
+    landsat_hyperspectral_dim: int = 0     # Dimension of Landsat hyperspectral representation (for S2→L8)
     use_hyperspectral: bool = True         # Whether to use hyperspectral representation
     
     # Resolution specifications
