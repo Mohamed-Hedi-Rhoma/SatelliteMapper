@@ -60,8 +60,11 @@ Output: Landsat-8 image [B, 6, 128, 128]
 All discriminators use the PatchGAN architecture with residual blocks and conditional normalization.
 
 ## Installation
+```bash
+# Install pixi package manager
+curl -fsSL https://pixi.sh/install.sh | bash
 
-Install pixi and then run:
+# Install project dependencies
 pixi install
 
 
